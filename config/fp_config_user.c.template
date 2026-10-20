@@ -1,0 +1,97 @@
+/*
+ * SPDX-FileCopyrightText: 2026 ENDUROSAT EAD
+ * SPDX-License-Identifier: LicenseRef-EnduroSat-1.0
+ */
+
+/**
+ * @addtogroup fp
+ * @{
+ *
+ * @file fp_config.c
+ * @brief Implementation of system-specific configuraion routines and handling defined by the user
+ *
+ * @}
+ *
+ */
+
+#include "fp_config_user.h"
+#include "cmsis_os2.h" // the example usage in this file relies on a CMSIS-compliant RTOS
+#include "fp_disp_session_mgr.h"
+
+static const osMutexAttr_t fp_mutex_attr = {
+    "fp_mutex",
+    osMutexRecursive | osMutexPrioInherit,
+    NULL,
+    0U
+};
+
+static osMutexId_t rs485_os_locks[FP_LOCK_SECTION_MAX];
+
+/** @brief RS485 system-specific send function which transfers the FP frame over a RS485 bus
+ *
+ *  @param[in] p_disp_ctx pointer to an FP dispatch information structure
+ *
+ *  @retval true the send operation was successful
+ *  @retval false the send operation failed
+ */
+static bool fp_send_rs485(void *p_disp_ctx)
+{
+    // this function will be called by the FP service whenever there is a need for FP frame transmission
+    fp_dispatch_info_t *p_disp_info = (fp_dispatch_info_t *)p_disp_ctx;
+
+    // perform RS485-specific send operations here...
+}
+
+static fp_dispatch_sys_context_t fp_sys_contexts[FP_CONFIG_SYS_CTX_TYPE_MAX] = {
+    [FP_CONFIG_SYS_CTX_TYPE_LOCAL] = { 0 },
+    [FP_CONFIG_SYS_CTX_TYPE_RS485] = { .p_section_locks = NULL, // initialize this to an array of OS mutex handles
+                                       .p_send          = &fp_send_rs485 },
+    [FP_CONFIG_SYS_CTX_TYPE_CSP]   = { 0 }
+};
+
+void fp_config_user_init(void)
+{
+    static osThreadId_t         fp_cfg_user_task_hnd;
+    static const osThreadAttr_t fp_cfg_user_task_attr = {
+        .name       = "fp_session_task",
+        .priority   = (osPriority_t)osPriorityNormal,
+        .stack_size = 1000
+    };
+
+    fp_cfg_user_task_hnd = osThreadNew(&fp_config_user_task, NULL, &fp_cfg_user_task_attr);
+    fp_arch_assert(NULL != fp_cfg_user_task_hnd);
+
+    for (uint8_t lock_id = 0; lock_id < FP_LOCK_SECTION_MAX; lock_id++)
+    {
+        rs485_os_locks[lock_id] = osMutexNew(&mutex_attr);
+        fp_arch_assert(NULL != rs485_os_locks[lock_id]);
+        fp_sys_contexts[FP_CONFIG_SYS_CTX_TYPE_RS485].p_section_locks = (void *)&rs485_os_locks[lock_id];
+    }
+
+    fp_disp_session_mgr_init(&fp_sys_contexts[FP_CONFIG_SYS_CTX_TYPE_RS485]);
+}
+
+void fp_config_user_assign_sys_context(fp_dispatch_info_t *p_disp_ctx, fp_config_sys_ctx_type_t sys_ctx_type)
+{
+    fp_dispatch_sys_context_t *p_ctx = NULL;
+
+    fp_arch_assert(NULL != p_disp_ctx);
+    fp_arch_assert(sys_ctx_type < FP_CONFIG_SYS_CTX_TYPE_MAX);
+
+    if (NULL != p_disp_ctx)
+    {
+        p_disp_ctx->p_sys_ctx = (sys_ctx_type < FP_CONFIG_SYS_CTX_TYPE_MAX) ? &fp_sys_contexts[sys_ctx_type] : NULL;
+    }
+}
+
+static void fp_config_user_task(void *p_args)
+{
+    (void)p_args;
+
+    while (true)
+    {
+        fp_disp_session_mgr_track_sessions(&fp_sys_contexts[FP_CONFIG_SYS_CTX_TYPE_RS485]);
+
+        osDelay(1000);
+    }
+}

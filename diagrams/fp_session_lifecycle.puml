@@ -1,0 +1,85 @@
+@startuml
+' SPDX-FileCopyrightText: 2026 ENDUROSAT EAD
+' SPDX-License-Identifier: LicenseRef-EnduroSat-1.0
+!theme plain
+title FP Session Lifecycle Management
+
+state "Session Pool" as Pool {
+    state "Available" as Available
+    state "Active" as Active
+    state "Timeout Tracking" as Tracking
+}
+
+state "Client Session Lifecycle" as ClientLifecycle {
+    state "Client Idle" as ClientIdle
+    state "Request Sent" as RequestSent
+    state "Waiting Response" as WaitingResp
+    state "Response Received" as RespReceived
+    state "Client Timeout" as ClientTimeout
+}
+
+state "Server Session Lifecycle" as ServerLifecycle {
+    state "Server Idle" as ServerIdle
+    state "ARM Received" as ARMReceived
+    state "Armed & Waiting" as ArmedWaiting
+    state "FIRE Received" as FIREReceived
+    state "Operation Executed" as OpExecuted
+    state "DISARM Received" as DISARMReceived
+    state "Server Timeout" as ServerTimeout
+}
+
+' Client session transitions
+ClientIdle --> RequestSent : fp_disp_client_send_req()
+RequestSent --> Available : [Session allocation failed]
+RequestSent --> WaitingResp : [Session allocated]
+WaitingResp --> RespReceived : [Response arrives]
+WaitingResp --> ClientTimeout : [Timeout elapsed]
+RespReceived --> ClientIdle : [Session closed]
+ClientTimeout --> ClientIdle : [Session closed]
+
+' Server session transitions
+ServerIdle --> ARMReceived : [ARM request arrives]
+ARMReceived --> Available : [Validation failed]
+ARMReceived --> ArmedWaiting : [ARM validated & session created]
+ArmedWaiting --> FIREReceived : [FIRE request arrives]
+ArmedWaiting --> DISARMReceived : [DISARM request arrives]
+ArmedWaiting --> ServerTimeout : [15 min timeout]
+FIREReceived --> OpExecuted : [Hash validation passed]
+FIREReceived --> ArmedWaiting : [Hash validation failed]
+OpExecuted --> ServerIdle : [Session closed]
+DISARMReceived --> ServerIdle : [Session closed]
+ServerTimeout --> ServerIdle : [Session auto-closed]
+
+' Session pool management
+Available --> Active : [Session allocated]
+Active --> Tracking : [Session in use]
+Tracking --> Available : [Session released]
+
+note right of ClientLifecycle
+  Client Session Features:
+  - Request/response matching
+  - Timeout management
+  - Sync/async support
+  - Event signaling
+  - Response buffering
+end note
+
+note right of ServerLifecycle
+  Server Session Features:
+  - ARM-and-FIRE tracking
+  - Data hash validation
+  - 15-minute timeout
+  - State persistence
+  - Automatic cleanup
+end note
+
+note bottom of Pool
+  Session Pool Management:
+  - Pre-allocated sessions
+  - Configurable limits
+  - Thread-safe allocation
+  - Metrics tracking
+  - Resource protection
+end note
+
+@enduml

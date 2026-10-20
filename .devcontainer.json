@@ -1,0 +1,13 @@
+{
+    "name": "FP service",
+    "image": "mcr.microsoft.com/devcontainers/cpp:1-debian-12",
+    "postCreateCommand": "sudo apt-get update && sudo apt-get install -y --no-install-recommends gcovr",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-vscode.cpptools",
+                "ms-vscode.cpptools-extension-pack"
+            ]
+        }
+    }
+}

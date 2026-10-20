@@ -1,0 +1,105 @@
+@startuml
+' SPDX-FileCopyrightText: 2026 ENDUROSAT EAD
+' SPDX-License-Identifier: LicenseRef-EnduroSat-1.0
+!theme plain
+title EnduroSat Function Protocol (FP) - System Architecture
+
+package "Application Layer" {
+    [User Application] as UserApp
+    [Generated Client Code] as ClientGen
+    [Generated Server Code] as ServerGen
+}
+
+package "FP Service Core" {
+    [FP Dispatcher] as Dispatcher
+    [Session Manager] as SessionMgr
+    [FIDL Registry] as Registry
+    [Protocol Handler] as ProtoHandler
+}
+
+package "Transport Layer" {
+    [CSP Transport] as CSP
+    [RS485 Transport] as RS485
+    [Local Transport] as Local
+}
+
+package "Platform Abstraction" {
+    [fp_arch Interface] as ArchInterface
+    [Timer Services] as Timers
+    [Mutex/Locks] as Locks
+    [Event Signaling] as Events
+    [Hash Calculation] as Hash
+}
+
+package "Host System" {
+    [RTOS/OS] as OS
+    [Hardware Drivers] as HW
+    [Communication Stack] as CommStack
+}
+
+' Application connections
+UserApp --> ClientGen : "API Calls"
+UserApp --> ServerGen : "Request Handlers"
+
+' FP Service connections
+ClientGen --> Dispatcher : "fp_disp_client_send_req()"
+ServerGen --> Dispatcher : "fp_disp_server_handle_req()"
+Dispatcher --> SessionMgr : "Session Management"
+Dispatcher --> Registry : "FIDL Lookup"
+Dispatcher --> ProtoHandler : "Message Processing"
+
+' Session Manager connections
+SessionMgr --> ArchInterface : "Timer & Lock APIs"
+
+' Transport connections
+Dispatcher --> CSP : "CSP Send/Receive"
+Dispatcher --> RS485 : "RS485 Send/Receive"
+Dispatcher --> Local : "Local Send/Receive"
+
+' Platform abstraction connections
+ArchInterface --> Timers : "Timeout Management"
+ArchInterface --> Locks : "Thread Synchronization"
+ArchInterface --> Events : "Blocking Operations"
+ArchInterface --> Hash : "Data Integrity"
+
+' Host system connections
+Timers --> OS : "System Tick/Timers"
+Locks --> OS : "Mutex/Semaphore"
+Events --> OS : "Event Flags"
+Hash --> HW : "CRC/Hash Hardware"
+CSP --> CommStack : "Network Stack"
+RS485 --> HW : "UART Driver"
+
+note right of Dispatcher
+  Central routing component
+  - Frame type detection
+  - Request/response matching
+  - Error handling
+  - Zero-copy operation
+end note
+
+note right of SessionMgr
+  Session lifecycle management
+  - Client session tracking
+  - Server session (ARM-and-FIRE)
+  - Timeout monitoring
+  - Resource cleanup
+end note
+
+note right of Registry
+  FIDL interface registry
+  - Interface registration
+  - Function lookup
+  - Thread-safe access
+  - Singleton pattern
+end note
+
+note bottom of ArchInterface
+  Platform abstraction layer
+  - OS-independent interface
+  - Configurable implementations
+  - Template-based integration
+  - Multi-platform support
+end note
+
+@enduml

@@ -1,0 +1,60 @@
+@startuml
+' SPDX-FileCopyrightText: 2026 ENDUROSAT EAD
+' SPDX-License-Identifier: LicenseRef-EnduroSat-1.0
+participant user_app
+participant csp_fp_thread
+participant fp_disp
+participant fp_registry
+participant fp_server_gen
+participant fp_client_gen
+
+== send a request to an external server over CSP (client) ==
+note over user_app: <b>prepare context for CSP operation:</b>\nctx->p_user_ctx = &CSP\nctx->p_fp_send = &csp_send
+user_app -> fp_client_gen: fp_cmd_req(&ctx)
+activate fp_client_gen
+note over fp_client_gen: prepare request buffer
+fp_client_gen -> fp_disp: fp_disp_send(&ctx, FP_FRAME_TYPE_REQ)
+activate fp_disp
+fp_disp -> csp_fp_thread: (*p_fp_send)(&ctx)
+deactivate fp_disp
+
+== receiving an external request over CSP (server) ==
+note over csp_fp_thread: prepare context for CSP operation
+csp_fp_thread -> fp_disp: fp_disp_execute(ctx)
+activate fp_disp
+fp_disp -> fp_registry: fp_registry_get_fidl_if_by_id(iface_id, FIDL_TYPE_SERVER)
+activate fp_registry
+fp_registry --> fp_disp: (fidl_if_t *) p_fidl
+deactivate fp_registry
+
+fp_disp -> fp_server_gen: fp_req(&ctx)
+activate fp_server_gen
+fp_server_gen -> fp_disp: fp_disp_send(&ctx, FP_FRAME_TYPE_RESP)
+deactivate fp_server_gen
+note left fp_disp
+send server response using the pre-configured send function
+end note
+fp_disp -> csp_fp_thread: (*p_fp_send)(&ctx)
+activate csp_fp_thread
+deactivate fp_disp
+deactivate csp_fp_thread
+
+== receiving a response to a previously sent request over CSP (client) ==
+note over csp_fp_thread: prepare context for CSP operation
+csp_fp_thread -> fp_disp: fp_disp_execute(ctx)
+activate fp_disp
+fp_disp -> fp_registry: fp_registry_get_fidl_if_by_id(iface_id, FIDL_TYPE_CLIENT)
+activate fp_registry
+fp_registry --> fp_disp: (fidl_if_t *) p_fidl
+deactivate fp_registry
+fp_disp -> fp_client_gen: fp_resp(&ctx)
+deactivate fp_disp
+
+note over fp_client_gen
+<b>send deserialized response to user_app:</b>
+could be either through static registration of callbacks for specific users or
+dynamic callback registration via the generated <i>fp_cmd_req()</i> call
+end note
+fp_client_gen -> user_app: fp_user_resp(...)
+
+@enduml

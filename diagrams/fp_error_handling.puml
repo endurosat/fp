@@ -1,0 +1,129 @@
+@startuml
+' SPDX-FileCopyrightText: 2026 ENDUROSAT EAD
+' SPDX-License-Identifier: LicenseRef-EnduroSat-1.0
+!theme plain
+title FP Error Handling and Recovery Scenarios
+
+participant "Client App" as Client
+participant "FP Dispatcher" as Dispatcher
+participant "Session Manager" as SessionMgr
+participant "Transport" as Transport
+participant "Server App" as Server
+
+== Scenario 1: Invalid Arguments ==
+Client -> Dispatcher: fp_disp_client_send_req(NULL, ...)
+activate Dispatcher
+note over Dispatcher: Validate parameters
+Dispatcher -> Client: FP_CMD_STATUS_INVARGS
+deactivate Dispatcher
+
+== Scenario 2: Session Pool Exhausted ==
+Client -> Dispatcher: fp_disp_client_send_req(...)
+activate Dispatcher
+Dispatcher -> SessionMgr: fp_disp_session_mgr_open_session()
+activate SessionMgr
+note over SessionMgr: All sessions in use
+SessionMgr -> Dispatcher: NULL (no available session)
+deactivate SessionMgr
+Dispatcher -> Client: FP_CMD_STATUS_NO_MEM
+deactivate Dispatcher
+
+== Scenario 3: Transport Send Failure ==
+Client -> Dispatcher: fp_disp_client_send_req(...)
+activate Dispatcher
+Dispatcher -> SessionMgr: [Session allocated successfully]
+Dispatcher -> Transport: (*p_fp_send)(&ctx)
+activate Transport
+note over Transport: Network/hardware failure
+Transport -> Dispatcher: false (send failed)
+deactivate Transport
+Dispatcher -> SessionMgr: [Close session]
+Dispatcher -> Client: FP_CMD_STATUS_SENDERR
+deactivate Dispatcher
+
+== Scenario 4: Response Timeout ==
+Client -> Dispatcher: fp_disp_client_send_req(..., timeout=5000)
+activate Dispatcher
+Dispatcher -> Transport: [Send successful]
+note over Dispatcher: Start timeout tracking
+... 5000ms elapsed ...
+note over SessionMgr: Timer expires
+SessionMgr -> SessionMgr: [Auto-close session]
+Dispatcher -> Client: FP_CMD_STATUS_TIMEOUT
+deactivate Dispatcher
+
+== Scenario 5: Unsupported Function ==
+Client -> Dispatcher: [Request sent successfully]
+Dispatcher -> Transport: [Forward to server]
+Transport -> Server: [Request received]
+activate Server
+note over Server: Function not implemented
+Server -> Transport: FP_CMD_STATUS_FUNC_NOT_SUPPORTED
+deactivate Server
+Transport -> Dispatcher: [Response received]
+Dispatcher -> Client: FP_CMD_STATUS_FUNC_NOT_SUPPORTED
+
+== Scenario 6: ARM-and-FIRE Data Integrity Error ==
+Client -> Dispatcher: [ARM request sent]
+Dispatcher -> Server: [ARM processed, session created]
+Server -> Dispatcher: FP_CMD_STATUS_ARMED
+Dispatcher -> Client: FP_CMD_STATUS_ARMED
+
+note over Client: User modifies request data
+Client -> Dispatcher: [FIRE request with modified data]
+Dispatcher -> Server: [FIRE request]
+activate Server
+note over Server: Hash mismatch detected\nnew_hash != stored_hash
+Server -> Dispatcher: FP_CMD_STATUS_DATA_INTEGRITY_ERR
+deactivate Server
+Dispatcher -> Client: FP_CMD_STATUS_DATA_INTEGRITY_ERR
+note over Server: Session remains active\nfor potential retry
+
+== Scenario 7: ARM-and-FIRE Timeout ==
+Client -> Dispatcher: [ARM request sent]
+Dispatcher -> Server: [ARM processed]
+Server -> Dispatcher: FP_CMD_STATUS_ARMED
+Dispatcher -> Client: FP_CMD_STATUS_ARMED
+
+note over Server: 15 minutes elapse
+note over SessionMgr: Automatic session cleanup
+SessionMgr -> SessionMgr: [Close server session]
+
+Client -> Dispatcher: [FIRE request sent after timeout]
+Dispatcher -> Server: [FIRE request]
+activate Server
+note over Server: No active session found
+Server -> Dispatcher: FP_CMD_STATUS_FUNC_NOT_SUPPORTED
+deactivate Server
+Dispatcher -> Client: FP_CMD_STATUS_FUNC_NOT_SUPPORTED
+
+== Scenario 8: Lock Timeout ==
+Client -> Dispatcher: fp_disp_client_send_req(...)
+activate Dispatcher
+Dispatcher -> SessionMgr: fp_disp_session_mgr_open_session()
+activate SessionMgr
+note over SessionMgr: fp_arch_lock_section() timeout
+SessionMgr -> Dispatcher: NULL (lock failed)
+deactivate SessionMgr
+Dispatcher -> Client: FP_CMD_STATUS_NO_MEM
+deactivate Dispatcher
+
+note right of Dispatcher
+  Error Recovery Strategies:
+  - Graceful degradation
+  - Resource cleanup
+  - Session auto-recovery
+  - Timeout protection
+  - Status code propagation
+end note
+
+note right of SessionMgr
+  Session Protection:
+  - Automatic timeout cleanup
+  - Resource leak prevention
+  - Thread-safe operations
+  - Metrics tracking
+  - Error state handling
+end note
+
+@enduml

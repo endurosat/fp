@@ -1,0 +1,130 @@
+@startuml
+' SPDX-FileCopyrightText: 2026 ENDUROSAT EAD
+' SPDX-License-Identifier: LicenseRef-EnduroSat-1.0
+!theme plain
+title FP Message Format and Protocol Stack
+
+package "FP Message Structure" {
+    rectangle "FP Header (8 bytes)" as FPHeader {
+        rectangle "iface_id\n(2 bytes)" as IfaceId
+        rectangle "func_id\n(4 bytes)" as FuncId
+        rectangle "cmd_id\n(2 bytes)" as CmdId
+        rectangle "status\n(1 byte)" as Status
+    }
+    
+    rectangle "Payload Data\n(Variable Length)" as Payload
+}
+
+package "Function ID Bit Layout" {
+    rectangle "func_id (32 bits)" as FuncIdBits {
+        rectangle "31" as Bit31
+        rectangle "30" as Bit30
+        rectangle "29" as Bit29
+        rectangle "28" as Bit28
+        rectangle "27-20\n(Reserved)" as Reserved
+        rectangle "19-0\nFunction ID\n(20 bits)" as ActualFuncId
+    }
+}
+
+package "Frame Type Mapping" {
+    rectangle "Attribute Bits → Frame Type" as FrameMapping {
+        rectangle "0000 → REQ" as REQ
+        rectangle "0001 → REQ_ARM" as ARM
+        rectangle "0010 → REQ_FIRE" as FIRE
+        rectangle "0011 → REQ_DISARM" as DISARM
+        rectangle "1000 → RESP" as RESP
+        rectangle "0101 → BROADCAST" as BROADCAST
+    }
+}
+
+package "Protocol Stack Layers" {
+    rectangle "Application Layer" as AppLayer {
+        rectangle "User Data Structures" as UserData
+        rectangle "FIDL Generated Code" as FIDL
+    }
+    
+    rectangle "FP Protocol Layer" as FPLayer {
+        rectangle "FP Header Processing" as HeaderProc
+        rectangle "Session Management" as Sessions
+        rectangle "ARM-and-FIRE Logic" as ArmFire
+    }
+    
+    rectangle "Transport Layer" as TransportLayer {
+        rectangle "CSP Protocol" as CSPProto
+        rectangle "RS485 Serial" as RS485Proto
+        rectangle "Local IPC" as LocalProto
+    }
+    
+    rectangle "Physical Layer" as PhysLayer {
+        rectangle "Network Interface" as NetIf
+        rectangle "UART Hardware" as UART
+        rectangle "Memory/Pipes" as Memory
+    }
+}
+
+' Message structure relationships
+FPHeader --> Payload : "Followed by"
+IfaceId --> FuncId : "Sequential"
+FuncId --> CmdId : "Sequential"
+CmdId --> Status : "Sequential"
+
+' Function ID bit relationships
+FuncId --> FuncIdBits : "Bit layout"
+Bit31 --> Reserved : "MSB to LSB"
+Reserved --> ActualFuncId : "MSB to LSB"
+
+' Frame type relationships
+FuncIdBits --> FrameMapping : "Attribute bits determine"
+
+' Protocol stack relationships
+UserData --> FIDL : "Serialized by"
+FIDL --> HeaderProc : "Wrapped with FP header"
+HeaderProc --> Sessions : "Session tracking"
+Sessions --> ArmFire : "ARM-and-FIRE processing"
+ArmFire --> CSPProto : "Transport selection"
+ArmFire --> RS485Proto : "Transport selection"
+ArmFire --> LocalProto : "Transport selection"
+CSPProto --> NetIf : "Physical transmission"
+RS485Proto --> UART : "Physical transmission"
+LocalProto --> Memory : "Physical transmission"
+
+note right of FPHeader
+  FP Header Fields:
+  - iface_id: FIDL interface identifier
+  - func_id: Function ID + attribute bits
+  - cmd_id: Request/response matching
+  - status: Operation result code
+  
+  Total header size: 9 bytes
+  Packed structure (no padding)
+end note
+
+note right of FuncIdBits
+  Function ID Encoding:
+  - Bit 31: Response indicator
+  - Bit 30: ARM request
+  - Bit 29: FIRE request
+  - Bit 28: DISARM request
+  - Bit 27: BROADCAST request
+  - Bits 26-20: Reserved
+  - Bits 19-0: Actual function ID
+
+  Max functions: 1,048,576
+end note
+
+note bottom of FrameMapping
+  Frame Type Detection:
+  fp_proto_get_func_attributes()
+  extracts frame type from
+  function ID attribute bits
+end note
+
+note bottom of TransportLayer
+  Transport Abstraction:
+  - Pluggable transport layer
+  - Context-specific configuration
+  - Send function pointers
+  - Zero-copy when possible
+end note
+
+@enduml

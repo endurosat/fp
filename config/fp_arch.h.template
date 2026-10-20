@@ -1,0 +1,217 @@
+/*
+ * SPDX-FileCopyrightText: 2026 ENDUROSAT EAD
+ * SPDX-License-Identifier: LicenseRef-EnduroSat-1.0
+ */
+
+/**
+ * @addtogroup fp
+ * @{
+ *
+ * @file fp_arch.h
+ * @brief Architecture-specific interface which is used by the FP implementation
+ *
+ * @}
+ *
+ */
+
+#ifndef FP_ARCH_H
+#define FP_ARCH_H
+
+#include <stdint.h>
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/*
+***************************************************************************************************
+* EXTERNAL DEFINES
+***************************************************************************************************
+*/
+// Check for TI MSP430 compiler
+#ifdef __TI_COMPILER_VERSION__
+// MSP430 Compiler detected
+#define PACK_STRUCT_BEGIN _Pragma("pack(push, 1)")
+#define PACK_STRUCT_END   _Pragma("pack(pop)")
+
+// Check for GCC compiler
+#elif defined(__GNUC__)
+// GCC Compiler detected
+#define PACK_STRUCT_BEGIN _Pragma("pack(push, 1)")
+#define PACK_STRUCT_END   _Pragma("pack(pop)")
+
+// Check for Microsoft C/C++ compiler
+#elif defined(_MSC_VER)
+// Microsoft Compiler detected
+#define PACK_STRUCT_BEGIN __pragma(pack(push, 1))
+#define PACK_STRUCT_END   __pragma(pack(pop))
+
+// If the compiler is neither MSP430, GCC, nor MSVC, emit an error
+#else
+#error "Unsupported compiler! This code supports only TI MSP430 and GCC compilers."
+#endif
+
+/** @brief Number of section locks used by fp for internal purposes and are context-dependent. Can be used by the platform-specific
+ *  implementation to pre-allocate locks in advance. The library guarantees that the maximum section ID passed
+ *  to @ref fp_arch_lock_section and @ref fp_arch_unlock_section will be (FP_LOCK_SECTION_MAX - 1).
+ */
+#define FP_MAX_SECTION_LOCKS_CNT (2)
+
+// Standard trace macros used by fp
+#ifndef FP_ARCH_TRACE_ERROR
+#define FP_ARCH_TRACE_ERROR(format, ...)
+#endif
+
+#ifndef FP_ARCH_TRACE_WARN
+#define FP_ARCH_TRACE_WARN(format, ...)
+#endif
+
+#ifndef FP_ARCH_TRACE_INFO
+#define FP_ARCH_TRACE_INFO(format, ...)
+#endif
+
+#ifndef FP_ARCH_TRACE_FATAL
+#define FP_ARCH_TRACE_FATAL(format, ...)
+#endif
+
+#ifndef FP_ARCH_TRACE_DEBUG
+#define FP_ARCH_TRACE_DEBUG(format, ...)
+#endif
+/*
+***************************************************************************************************
+* EXTERNAL TYPE DECLARATIONS
+***************************************************************************************************
+*/
+/** @brief Dummy timer handle type (redefine to map this to the system where fp is integrated) */
+typedef uint32_t fp_arch_timer_handle_t;
+
+/*
+***************************************************************************************************
+* EXTERNAL ROUTINES DECLARATIONS
+***************************************************************************************************
+*/
+/** @brief Initialize the event object
+ *
+ * @param pp_event pointer to the system-specific event object storage to initialize
+ *
+ * @note The function is called before client request transmission to ensure that
+ * the event object is properly initialized. It could be used externally to match
+ * the event object to the currently called thread to enable unblocking of the thread
+ * later by the call to @ref fp_arch_signal_event.
+ */
+void fp_arch_init_event(void **pp_event);
+
+/**
+ * @brief The function waits for an event to be signalled for a period of time
+ *
+ * @param p_event pointer to the system-specific event object to monitor for changes
+ * @param timeout_ms milliseconds to wait for the flag to change to the
+specified value before exiting the function
+ * @retval true the event was signaled before the timeout period elapsed
+ * @retval false the timeout period elapsed
+ *
+ * @note The idea of this function is to block the caller in the most efficient
+ * way supported by the underlying platform (e.g. if there is an OS, this wait
+ * can be on a condition variable or OS event, otherwise it could be a simple active wait)
+ *
+ */
+bool fp_arch_wait_for_event(void *p_event, const uint32_t timeout_ms);
+
+/** @brief Signal the specified event and clear it for subsequent use
+ *
+ * @param p_event pointer to the system-specific event object to signal
+ */
+void fp_arch_signal_event(void *p_event);
+
+/** @brief Implements a platform-specific thread locking for the FP registry module
+ *
+ *  @note The function operates on a single system-level lock unlike section locks used in other FP modules which are
+ *  attributed to the communication context.
+ *
+ *  @retval true The lock has been successfully obtained.
+ *  @retval false The lock could not be obtained.
+ */
+bool fp_arch_lock_registry(void);
+
+/** @brief Performs a thread unlock for the FP registry module
+ *
+ *  @note The function operates on a single system-level lock unlike section locks used in other FP modules which are
+ *  attributed to the communication context.
+ *
+ *  @note If an unlock is called on a section which hasn't been locked, the function shall have no effect whatsoever.
+ */
+void fp_arch_unlock_registry(void);
+
+/** @brief Implements a platform-specific thread locking to avoid race conditions to internal fp structures
+ *
+ *  @param[in] p_lock a pointer to a system-lock primitive (e.g. mutex)
+ *
+ *  @retval true The lock has been successfully obtained.
+ *  @retval false The lock could not be obtained.
+ */
+bool fp_arch_lock_section(void *const p_lock);
+
+/** @brief Performs a section unlock on the given lock handle
+ *
+ *  @param[in] p_lock a pointer to a system-lock primitive (e.g. mutex)
+ *
+ *  @note If an unlock is called on a section which hasn't been locked, the function shall have no effect whatsoever.
+ */
+void fp_arch_unlock_section(void *const p_lock);
+
+/** @brief Performs a platform-specific assert check
+ *
+ *  @param[in] cond assert condition (if true - an assert violation is triggered)
+ */
+void fp_arch_assert(const bool cond);
+
+/** @brief Performs a platform-specific assert check which automatically sets a debugger breakpoint if
+ *  supported by the system.
+ *
+ *  @param[in] cond assert condition (if true - an assert violation is triggered)
+ */
+void fp_arch_break_assert(const bool cond);
+
+/** @brief Start the timer associated to the given handle
+ *
+ *  @param[in] p_timer_hnd pointer to a timer handle
+ *
+ */
+void fp_arch_start_timer(fp_arch_timer_handle_t *const p_timer_hnd);
+
+/** @brief Stop the timer associated to the given handle
+ *
+ *  @param[in] p_timer_hnd pointer to a timer handle
+ *
+ */
+void fp_arch_stop_timer(fp_arch_timer_handle_t *const p_timer_hnd);
+
+/** @brief Check if a timer has elapsed
+ *
+ *  @param[in] p_timer_hnd pointer to the timer handle
+ *  @param[in] elapse_time time in milliseconds to check
+ *
+ *  @retval true the specified time has elapsed on this timer or the timer has not been started
+ *  @retval false the specifie4d time has not elapsed on this timer
+ */
+bool fp_arch_is_timer_elapsed(fp_arch_timer_handle_t *const p_timer_hnd, const uint32_t elapse_time);
+
+/** @brief System-specific hash calculation for a buffer of data
+ *
+ *  @param[in] p_data pointer to the beginning of the data buffer
+ *  @param[in] data_sz size of the data in the buffer (in bytes)
+ *
+ *  @returns 2-byte hash calculated for the given buffer
+ *
+ *  @note The actual hash algorithm provided here can be as simple as a cylic sum over the data bytes or
+ *  a CRC16 calculation. It is left as a configurable option because most project already include libraries for
+ *  such calculations and FP does not need to provide this internally.
+ */
+uint16_t fp_arch_calc_hash(const uint8_t *const p_data, const uint32_t data_sz);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* FP_ARCH_H */

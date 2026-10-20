@@ -1,0 +1,50 @@
+/*
+ * SPDX-FileCopyrightText: 2026 ENDUROSAT EAD
+ * SPDX-License-Identifier: LicenseRef-EnduroSat-1.0
+ */
+
+/**
+ * @addtogroup fp
+ * @{
+ *
+ * @file fp_config_user.h
+ * @brief System-specific configuraion definitions related to the FP implementation
+ *
+ * @}
+ *
+ */
+
+#ifndef FP_CONFIG_USER_H
+#define FP_CONFIG_USER_H
+
+#include <stdint.h>
+#include "fp_disp.h"
+
+/** @brief Configure this list depending on the system supported interfaces to serve FP communication */
+typedef enum
+{
+    FP_CONFIG_SYS_CTX_TYPE_LOCAL,
+    FP_CONFIG_SYS_CTX_TYPE_RS485,
+    FP_CONFIG_SYS_CTX_TYPE_CSP,
+    FP_CONFIG_SYS_CTX_TYPE_MAX
+} fp_config_sys_ctx_type_t;
+
+/** @brief Initialize all FP-related system contexts.
+ *
+ *  @note Make sure to call this function before all threads relying on the FP service.
+ */
+void fp_config_user_init(void);
+
+/** @brief Obtain a reference to a system context of a given type
+ *
+ *  @param[out] p_disp_ctx FP dispatch context to bind to the system context
+ *  @param[in] sys_ctx_type type of system context to get a reference to
+ *
+ *  @returns a reference to an FP system-dependent context
+ *
+ *  @note FP system contexts provide the storage for client/server session tracking, OS lock references to use
+ *  for context data protection and context-specific send function reference
+ */
+void fp_config_user_assign_sys_context(fp_dispatch_info_t *p_disp_ctx, fp_config_sys_ctx_type_t sys_ctx_type);
+
+#endif

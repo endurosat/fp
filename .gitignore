@@ -1,0 +1,15 @@
+/build
+/CMakeFiles
+/CMakeCache.txt
+test/_deps
+test/build/
+/.cache/
+
+# Local IDE and assistant settings
+.vscode/
+.idea/
+.sonarlint/
+.claude/
+CLAUDE.md
+AGENTS.md
+c_cpp_properties.json

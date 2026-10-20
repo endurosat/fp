@@ -1,0 +1,149 @@
+@startuml
+' SPDX-FileCopyrightText: 2026 ENDUROSAT EAD
+' SPDX-License-Identifier: LicenseRef-EnduroSat-1.0
+participant user_app
+participant fp_client_gen
+participant csp_fp_thread
+participant fp_disp
+participant fp_registry
+participant fp_session_mgr
+participant fp_server_gen
+
+== ARM Stage: Client sends ARM request ==
+note over user_app: <b>prepare context for ARM operation:</b>\nctx->p_user_ctx = &CSP\nctx->p_fp_send = &csp_send
+user_app -> fp_client_gen: fp_cmd_req(&ctx) with ARM bit set
+activate fp_client_gen
+note over fp_client_gen: prepare ARM request buffer\nfp_proto_set_frame_type(p_fp_hdr, FP_FRAME_TYPE_REQ_ARM)
+fp_client_gen -> fp_disp: fp_disp_send(&ctx, FP_FRAME_TYPE_REQ_ARM)
+activate fp_disp
+fp_disp -> csp_fp_thread: (*p_fp_send)(&ctx)
+deactivate fp_disp
+
+== ARM Stage: Server receives and processes ARM request ==
+note over csp_fp_thread: receive ARM request over CSP
+csp_fp_thread -> fp_disp: fp_disp_execute(ctx)
+activate fp_disp
+fp_disp -> fp_registry: fp_registry_get_fidl_if_by_id(iface_id, FIDL_TYPE_SERVER)
+activate fp_registry
+fp_registry --> fp_disp: (fidl_if_t *) p_fidl
+deactivate fp_registry
+
+fp_disp -> fp_disp: fp_disp_server_handle_arm_and_fire_req()
+activate fp_disp
+note over fp_disp: check frame_type == FP_FRAME_TYPE_REQ_ARM\nno existing server session found
+fp_disp -> fp_session_mgr: fp_disp_session_mgr_open_session(FP_DISP_SESSION_TYPE_SERVER)
+activate fp_session_mgr
+fp_session_mgr --> fp_disp: p_server_sess
+deactivate fp_session_mgr
+
+note over fp_disp: <b>ARM request processing:</b>\n1. Calculate hash of request data\n2. Store hash in server session\n3. Start disarm timer (15 min default)\n4. Store request ID for matching
+fp_disp -> fp_disp: fp_arch_calc_hash(p_data, data_size)
+fp_disp -> fp_disp: fp_arch_start_timer(&p_server_sess->timer_hnd)
+fp_disp -> csp_fp_thread: fp_disp_send_status_resp(FP_CMD_STATUS_ARMED)
+deactivate fp_disp
+deactivate fp_disp
+
+== ARM Stage: Client receives ARMED confirmation ==
+csp_fp_thread -> fp_disp: fp_disp_execute(ctx) [ARMED response]
+activate fp_disp
+fp_disp -> fp_registry: fp_registry_get_fidl_if_by_id(iface_id, FIDL_TYPE_CLIENT)
+activate fp_registry
+fp_registry --> fp_disp: (fidl_if_t *) p_fidl
+deactivate fp_registry
+fp_disp -> fp_client_gen: fp_resp(&ctx) [ARMED status]
+deactivate fp_disp
+fp_client_gen -> user_app: fp_user_resp(FP_CMD_STATUS_ARMED)
+
+== FIRE Stage: Client sends FIRE request ==
+note over user_app: <b>user confirms operation</b>\nprepare FIRE request with same data
+user_app -> fp_client_gen: fp_cmd_req(&ctx) with FIRE bit set
+activate fp_client_gen
+note over fp_client_gen: prepare FIRE request buffer\nfp_proto_set_frame_type(p_fp_hdr, FP_FRAME_TYPE_REQ_FIRE)\n<b>IMPORTANT:</b> same request data as ARM
+fp_client_gen -> fp_disp: fp_disp_send(&ctx, FP_FRAME_TYPE_REQ_FIRE)
+activate fp_disp
+fp_disp -> csp_fp_thread: (*p_fp_send)(&ctx)
+deactivate fp_disp
+
+== FIRE Stage: Server receives and executes FIRE request ==
+note over csp_fp_thread: receive FIRE request over CSP
+csp_fp_thread -> fp_disp: fp_disp_execute(ctx)
+activate fp_disp
+fp_disp -> fp_registry: fp_registry_get_fidl_if_by_id(iface_id, FIDL_TYPE_SERVER)
+activate fp_registry
+fp_registry --> fp_disp: (fidl_if_t *) p_fidl
+deactivate fp_registry
+
+fp_disp -> fp_disp: fp_disp_server_handle_arm_and_fire_req()
+activate fp_disp
+note over fp_disp: <b>FIRE request validation:</b>\n1. Find existing server session\n2. Calculate hash of new request data\n3. Compare with stored hash\n4. Execute if hashes match
+fp_disp -> fp_disp: fp_arch_calc_hash(p_data, data_size)
+alt data integrity check passes
+    note over fp_disp: new_req_data_hash == p_server_sess->req_data_hash
+    fp_disp -> fp_server_gen: (*p_req_handler)(p_disp_ctx, p_data)
+    activate fp_server_gen
+    note over fp_server_gen: <b>execute actual operation</b>\nprocess request and prepare response
+    fp_server_gen -> fp_disp: fp_disp_send(&ctx, FP_FRAME_TYPE_RESP)
+    deactivate fp_server_gen
+    fp_disp -> csp_fp_thread: (*p_fp_send)(&ctx) [operation response]
+    fp_disp -> fp_session_mgr: fp_disp_session_mgr_close_session(p_server_sess)
+    activate fp_session_mgr
+    note over fp_session_mgr: close server session\nstop disarm timer
+    deactivate fp_session_mgr
+else data integrity check fails
+    note over fp_disp: new_req_data_hash != p_server_sess->req_data_hash
+    fp_disp -> csp_fp_thread: fp_disp_send_status_resp(FP_CMD_STATUS_DATA_INTEGRITY_ERR)
+    note over fp_disp: session remains active\ncontinue tracking disarm timeout
+end
+deactivate fp_disp
+deactivate fp_disp
+
+== FIRE Stage: Client receives operation response ==
+csp_fp_thread -> fp_disp: fp_disp_execute(ctx) [operation response]
+activate fp_disp
+fp_disp -> fp_registry: fp_registry_get_fidl_if_by_id(iface_id, FIDL_TYPE_CLIENT)
+activate fp_registry
+fp_registry --> fp_disp: (fidl_if_t *) p_fidl
+deactivate fp_registry
+fp_disp -> fp_client_gen: fp_resp(&ctx) [operation result]
+deactivate fp_disp
+fp_client_gen -> user_app: fp_user_resp(operation_result)
+deactivate fp_client_gen
+
+== Optional: DISARM Stage ==
+note over user_app: <b>user cancels operation</b>\n(alternative to FIRE)
+user_app -> fp_client_gen: fp_cmd_req(&ctx) with DISARM bit set
+activate fp_client_gen
+note over fp_client_gen: prepare DISARM request buffer\nfp_proto_set_frame_type(p_fp_hdr, FP_FRAME_TYPE_REQ_DISARM)
+fp_client_gen -> fp_disp: fp_disp_send(&ctx, FP_FRAME_TYPE_REQ_DISARM)
+activate fp_disp
+fp_disp -> csp_fp_thread: (*p_fp_send)(&ctx)
+deactivate fp_disp
+
+csp_fp_thread -> fp_disp: fp_disp_execute(ctx)
+activate fp_disp
+fp_disp -> fp_disp: fp_disp_server_handle_arm_and_fire_req()
+activate fp_disp
+note over fp_disp: frame_type == FP_FRAME_TYPE_REQ_DISARM\nfind existing server session
+fp_disp -> csp_fp_thread: fp_disp_send_status_resp(FP_CMD_STATUS_DISARMED)
+fp_disp -> fp_session_mgr: fp_disp_session_mgr_close_session(p_server_sess)
+activate fp_session_mgr
+note over fp_session_mgr: close server session\nstop disarm timer
+deactivate fp_session_mgr
+deactivate fp_disp
+deactivate fp_disp
+
+csp_fp_thread -> fp_disp: fp_disp_execute(ctx) [DISARMED response]
+activate fp_disp
+fp_disp -> fp_client_gen: fp_resp(&ctx) [DISARMED status]
+deactivate fp_disp
+fp_client_gen -> user_app: fp_user_resp(FP_CMD_STATUS_DISARMED)
+deactivate fp_client_gen
+
+== Timeout Scenario ==
+note over fp_session_mgr: <b>Automatic disarm after timeout</b>\n(default: 15 minutes)\nTimer expires for armed request
+fp_session_mgr -> fp_session_mgr: timer_callback()
+activate fp_session_mgr
+note over fp_session_mgr: automatically close server session\nrequest is disarmed
+deactivate fp_session_mgr
+
+@enduml

@@ -1,0 +1,129 @@
+@startuml
+' SPDX-FileCopyrightText: 2026 ENDUROSAT EAD
+' SPDX-License-Identifier: LicenseRef-EnduroSat-1.0
+!theme plain
+title FP Transport Layer Integration Patterns
+
+package "FP Core" {
+    [FP Dispatcher] as Dispatcher
+    [Session Manager] as SessionMgr
+}
+
+package "System Context Management" {
+    rectangle "fp_dispatch_sys_context_t" as SysContext {
+        rectangle "Session Pools" as SessionPools
+        rectangle "Section Locks" as SectionLocks
+        rectangle "Send Function Ptr" as SendFuncPtr
+        rectangle "Metrics" as Metrics
+    }
+}
+
+package "CSP Transport Context" {
+    rectangle "CSP System Context" as CSPContext {
+        rectangle "CSP Session Pool" as CSPSessions
+        rectangle "CSP Mutex Array" as CSPMutex
+        rectangle "csp_send_func()" as CSPSend
+        rectangle "CSP Metrics" as CSPMetrics
+    }
+    
+    rectangle "CSP Implementation" as CSPImpl {
+        rectangle "CSP Socket" as CSPSocket
+        rectangle "CSP Routing" as CSPRouting
+        rectangle "Network Stack" as NetStack
+    }
+}
+
+package "RS485 Transport Context" {
+    rectangle "RS485 System Context" as RS485Context {
+        rectangle "RS485 Session Pool" as RS485Sessions
+        rectangle "RS485 Mutex Array" as RS485Mutex
+        rectangle "rs485_send_func()" as RS485Send
+        rectangle "RS485 Metrics" as RS485Metrics
+    }
+    
+    rectangle "RS485 Implementation" as RS485Impl {
+        rectangle "UART Driver" as UART
+        rectangle "Frame Encoding" as FrameEnc
+        rectangle "Error Detection" as ErrorDet
+    }
+}
+
+package "Local Transport Context" {
+    rectangle "Local System Context" as LocalContext {
+        rectangle "Local Session Pool" as LocalSessions
+        rectangle "Local Mutex Array" as LocalMutex
+        rectangle "local_send_func()" as LocalSend
+        rectangle "Local Metrics" as LocalMetrics
+    }
+    
+    rectangle "Local Implementation" as LocalImpl {
+        rectangle "Message Queue" as MsgQueue
+        rectangle "Thread Communication" as ThreadComm
+        rectangle "Memory Buffers" as MemBuffers
+    }
+}
+
+' Core connections
+Dispatcher --> SysContext : "Uses context"
+SessionMgr --> SysContext : "Manages sessions"
+
+' Context inheritance
+SysContext <|-- CSPContext : "Inherits"
+SysContext <|-- RS485Context : "Inherits"
+SysContext <|-- LocalContext : "Inherits"
+
+' Transport implementations
+CSPContext --> CSPImpl : "Configured for"
+RS485Context --> RS485Impl : "Configured for"
+LocalContext --> LocalImpl : "Configured for"
+
+' Implementation details
+CSPSend --> CSPSocket : "Uses"
+CSPSocket --> CSPRouting : "Routes through"
+CSPRouting --> NetStack : "Transmits via"
+
+RS485Send --> UART : "Uses"
+UART --> FrameEnc : "Encodes with"
+FrameEnc --> ErrorDet : "Validates with"
+
+LocalSend --> MsgQueue : "Uses"
+MsgQueue --> ThreadComm : "Communicates via"
+ThreadComm --> MemBuffers : "Buffers in"
+
+note right of SysContext
+  System Context Features:
+  - Transport-agnostic interface
+  - Session isolation per context
+  - Context-specific locking
+  - Pluggable send functions
+  - Independent metrics tracking
+end note
+
+note right of CSPContext
+  CSP Transport Features:
+  - Network-based communication
+  - Routing and addressing
+  - Reliable delivery
+  - Space protocol compliance
+  - Multi-node support
+end note
+
+note right of RS485Context
+  RS485 Transport Features:
+  - Serial communication
+  - Half-duplex operation
+  - Frame-based protocol
+  - Error detection/correction
+  - Bus arbitration
+end note
+
+note right of LocalContext
+  Local Transport Features:
+  - In-process communication
+  - High-speed operation
+  - Zero-copy optimization
+  - Thread synchronization
+  - Memory-based buffers
+end note
+
+@enduml

@@ -1,0 +1,143 @@
+@startuml
+' SPDX-FileCopyrightText: 2026 ENDUROSAT EAD
+' SPDX-License-Identifier: LicenseRef-EnduroSat-1.0
+!theme plain
+title FP Session Class Hierarchy
+
+' Base session class
+class fp_disp_session_base_t {
+    +_Atomic fp_session_state_t state
+    +uint32_t timeout
+    +fp_arch_timer_handle_t timer_hnd
+    +fp_msg_hdr_t req_fp_hdr
+    +const void *p_session_attr
+    +void *p_comm_params
+    --
+    General session handling
+    Used for session management
+    and timeout tracking
+}
+
+' Server session class
+class fp_disp_server_session_t {
+    +fp_disp_session_base_t base
+    +fp_generic_request_handler_t p_user_handler
+    +uint16_t req_data_hash
+    --
+    +fp_disp_server_session_init()
+    +fp_disp_server_session_is_matching()
+    +fp_disp_server_session_track()
+    --
+    Tracks ARM-and-FIRE operations
+    Validates request data hash
+    15-minute timeout handling
+}
+
+' Client session class
+class fp_disp_client_session_t {
+    +fp_disp_session_base_t base
+    +fp_generic_response_handler_t p_user_handler
+    +fp_req_type_t req_type
+    +void *p_session_event
+    +uint8_t *p_resp_data
+    +uint32_t resp_data_max_size
+    --
+    +fp_disp_client_session_init()
+    +fp_disp_client_session_is_matching()
+    +fp_disp_client_session_track()
+    --
+    Request/response matching
+    Sync/async support
+    Response buffering
+}
+
+' Session attributes class (composition relationship)
+class fp_disp_session_attributes_t {
+    +p_init_func_t p_init_func
+    +p_is_matching_t p_is_matching
+    +p_track_session_t p_track_session
+    +const fp_disp_session_type_t sess_type
+    --
+    Session-specific behavior
+    Function pointers for polymorphism
+}
+
+' Inheritance relationships
+fp_disp_session_base_t <|-- fp_disp_server_session_t : inherits
+fp_disp_session_base_t <|-- fp_disp_client_session_t : inherits
+
+' Composition relationships
+fp_disp_session_base_t *-- fp_disp_session_attributes_t : p_session_attr
+
+' External attribute instances
+object fp_disp_server_sess_attrib {
+    sess_type = FP_DISP_SESSION_TYPE_SERVER
+    p_init_func = fp_disp_server_session_init
+    p_is_matching = fp_disp_server_session_is_matching
+    p_track_session = fp_disp_server_session_track
+}
+
+object fp_disp_client_sess_attrib {
+    sess_type = FP_DISP_SESSION_TYPE_CLIENT
+    p_init_func = fp_disp_client_session_init
+    p_is_matching = fp_disp_client_session_is_matching
+    p_track_session = fp_disp_client_session_track
+}
+
+fp_disp_session_attributes_t <.. fp_disp_server_sess_attrib : instance
+fp_disp_session_attributes_t <.. fp_disp_client_sess_attrib : instance
+
+note top of fp_disp_session_base_t
+  **Base Session Class**
+
+  Provides common session functionality:
+  • Atomic session state management (INACTIVE/OPENED/ACTIVE)
+  • Timeout handling with timer
+  • Request header matching
+  • Communication parameters
+  • Polymorphic behavior via p_session_attr
+
+  This implements "inheritance in C" pattern
+  where derived structs include this as
+  the first field to enable casting.
+end note
+
+note right of fp_disp_server_session_t
+  **Server Session**
+  
+  Specialized for ARM-and-FIRE operations:
+  • Tracks request handler callback
+  • Validates data integrity with hash
+  • Manages 15-minute timeout
+  • Handles DISARM operations
+  
+  Lifecycle: ARM → Armed & Waiting → FIRE/DISARM
+end note
+
+note right of fp_disp_client_session_t
+  **Client Session**
+  
+  Specialized for request/response:
+  • Supports sync/async requests
+  • Manages response buffering
+  • Event-based synchronization
+  • Response handler callbacks
+  
+  Lifecycle: Request → Waiting → Response
+end note
+
+note bottom of fp_disp_session_attributes_t
+  **Polymorphic Behavior**
+  
+  Enables session-type-specific behavior
+  through function pointers:
+  • Initialization
+  • Session matching
+  • Session tracking
+  
+  Each session type has its own
+  attribute instance with specific
+  function implementations.
+end note
+
+@enduml
