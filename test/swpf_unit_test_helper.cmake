@@ -84,7 +84,7 @@ add_custom_target(gen-test-coverage
     COMMAND ${GCOVR_EXECUTABLE} --filter "${TEST_CMP_ABS_PATH}/src/*" --cobertura --cobertura-pretty -o ${COV_REPORT_DIR}/cov-report-cobertura.xml
 
     COMMAND ${CMAKE_COMMAND} -E echo "Generating HTML detailed report"
-    COMMAND ${GCOVR_EXECUTABLE} --filter "${TEST_CMP_ABS_PATH}/src/*" --html-nested --output ${COV_REPORT_DIR}/cov-report.html --root ${TEST_CMP_ABS_PATH}
+    COMMAND ${GCOVR_EXECUTABLE} --filter "${TEST_CMP_ABS_PATH}/src/*" --html-details --output ${COV_REPORT_DIR}/cov-report.html --root ${TEST_CMP_ABS_PATH}
     BYPRODUCTS ${COV_REPORT_DIR} ${CMAKE_BINARY_DIR}/cov-report-cobertura.xml ${COV_REPORT_DIR}/coverage.info
     COMMENT "Generating coverage report"
     DEPENDS run-test
