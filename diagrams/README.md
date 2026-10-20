@@ -27,7 +27,9 @@ Use the provided bash script to generate SVG diagrams from the PlantUML files:
 ### Prerequisites
 
 - Java runtime environment
-- PlantUML (automatically downloaded if not available)
+- PlantUML: a `plantuml` command, or `plantuml.jar` in this directory. If neither is
+  found, the script asks before downloading the JAR; `--download` downloads the latest
+  JAR without asking.
 
 ### Script Options
 

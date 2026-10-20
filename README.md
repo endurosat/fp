@@ -1178,9 +1178,15 @@ cmake --build build/test --target gen-test-coverage
 ```
 
 ### Diagrams
+
+Requires a Java runtime and PlantUML: a `plantuml` command, or `plantuml.jar`
+in `diagrams/`. If neither is found, the script asks before downloading the
+JAR; `--download` downloads the latest JAR without asking (use it in
+non-interactive shells). See [diagrams/README.md](diagrams/README.md).
+
 ```bash
 cd diagrams
-./generate_svg.sh
+./generate_svg.sh            # non-interactive: ./generate_svg.sh --download
 # Open svg/*.svg files in a browser
 ```
 
