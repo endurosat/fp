@@ -508,11 +508,14 @@ The FP service maintains sophisticated session tracking for both client and serv
 **Key Fields:**
 ```c
 typedef struct {
-    fp_disp_session_base_t base;           // Common session data
-    fp_req_type_t req_type;                // SYNC or ASYNC
-    fp_generic_response_handler_t p_user_handler; // Response callback
-    uint8_t *p_resp_data;                  // Response buffer (sync only)
-    void *p_session_event;                 // Event for sync waiting
+    fp_disp_session_base_t        base;               // Common session data (first field)
+    fp_generic_response_handler_t p_user_handler;     // Response callback (async only)
+    fp_req_type_t                 req_type;           // SYNC or ASYNC
+    void                         *p_session_event;    // Event for sync waiting
+    uint8_t                      *p_resp_data;        // Response buffer (sync only)
+    uint32_t                      resp_data_max_size; // Pool-wide response slot capacity
+    uint32_t                      resp_buf_user_max;  // Caller buffer capacity (0 = pool-wide)
+    uint32_t                      resp_data_size;     // Bytes delivered for the last sync reply
 } fp_disp_client_session_t;
 ```
 
@@ -528,8 +531,9 @@ typedef struct {
 **Key Fields:**
 ```c
 typedef struct {
-    fp_disp_session_base_t base;           // Common session data
-    uint16_t req_data_hash;                // Hash of ARM request data
+    fp_disp_session_base_t       base;           // Common session data (first field)
+    fp_generic_request_handler_t p_user_handler; // Request handler run on FIRE
+    uint16_t                     req_data_hash;  // Hash of ARM request data
 } fp_disp_server_session_t;
 ```
 
@@ -539,6 +543,7 @@ typedef struct {
 ```c
 #define MAX_CLIENT_SESSIONS_COUNT ((uint16_t)5)
 #define MAX_SERVER_SESSIONS_COUNT ((uint16_t)5)
+#define MAX_FIDL_COUNT ((uint16_t)5)             // FIDL interfaces in the registry
 #define ARMED_REQ_TOUT_S ((uint16_t)(15 * 60))  // 15 minutes
 ```
 
@@ -548,7 +553,7 @@ The system tracks session statistics:
 ```c
 typedef struct {
     uint32_t active_session_cnt;     // Currently active sessions
-    uint32_t opened_session_cnt;     // Total sessions opened
+    uint32_t open_session_cnt;       // Total sessions opened
     uint32_t closed_session_cnt;     // Total sessions closed
     uint32_t timed_out_session_cnt;  // Sessions that timed out
 } fp_disp_session_metrics_t;
@@ -573,27 +578,27 @@ void fp_arch_signal_event(void *p_event);
 
 **Implementation Example (CMSIS-RTOS2):**
 ```c
+// Called before every synchronous request is sent: create the event once,
+// and clear a flag left by a response that arrived after an earlier timeout.
 void fp_arch_init_event(void **pp_event) {
-    osEventFlagsId_t *p_event_id = (osEventFlagsId_t *)pp_event;
-
-    if (*p_event_id == NULL) {
-        *p_event_id = osEventFlagsNew(NULL);
-        assert(*p_event_id != NULL);
+    if (*pp_event == NULL) {
+        *pp_event = osEventFlagsNew(NULL);
+        fp_arch_assert(*pp_event != NULL);
     }
+    (void)osEventFlagsClear((osEventFlagsId_t)*pp_event, 0x01U);
 }
 
+// The response may arrive before the caller starts waiting: the flag stays
+// set until this wait consumes it (osFlagsWaitAny clears it on return).
 bool fp_arch_wait_for_event(void *p_event, const uint32_t timeout_ms) {
-    osEventFlagsId_t event_id = (osEventFlagsId_t)p_event;
-    uint32_t flags = osEventFlagsWait(event_id, 0x01,
-                                     osFlagsWaitAny | osFlagsNoClear,
-                                     timeout_ms);
-    return (flags & 0x01) != 0;
+    uint32_t ticks = (uint32_t)(((uint64_t)timeout_ms * osKernelGetTickFreq()) / 1000U);
+    uint32_t flags = osEventFlagsWait((osEventFlagsId_t)p_event, 0x01U,
+                                      osFlagsWaitAny, ticks);
+    return ((flags & osFlagsError) == 0U) && ((flags & 0x01U) != 0U);
 }
 
 void fp_arch_signal_event(void *p_event) {
-    osEventFlagsId_t event_id = (osEventFlagsId_t)p_event;
-    osEventFlagsSet(event_id, 0x01);
-    osEventFlagsClear(event_id, 0x01);
+    (void)osEventFlagsSet((osEventFlagsId_t)p_event, 0x01U);
 }
 ```
 
@@ -614,12 +619,14 @@ void fp_arch_unlock_section(void *const p_lock);
 ```c
 static osMutexId_t g_registry_mutex = NULL;
 
-bool fp_arch_lock_registry(void) {
-    if (g_registry_mutex == NULL) {
-        g_registry_mutex = osMutexNew(NULL);
-        assert(g_registry_mutex != NULL);
-    }
+// Call once at start-up, before any thread uses FP: creating the mutex
+// lazily inside fp_arch_lock_registry() races when two threads lock first.
+void my_platform_fp_init(void) {
+    g_registry_mutex = osMutexNew(NULL);
+    fp_arch_assert(g_registry_mutex != NULL);
+}
 
+bool fp_arch_lock_registry(void) {
     osStatus_t status = osMutexAcquire(g_registry_mutex, osWaitForever);
     return (status == osOK);
 }
@@ -660,9 +667,11 @@ bool fp_arch_is_timer_elapsed(fp_arch_timer_handle_t *const p_timer_hnd,
 ```c
 typedef uint32_t fp_arch_timer_handle_t;
 
+// 0 means "not running", so a start at tick 0 (right after boot) is stored as 1.
 void fp_arch_start_timer(fp_arch_timer_handle_t *const p_timer_hnd) {
     if (p_timer_hnd != NULL) {
-        *p_timer_hnd = osKernelGetTickCount();
+        uint32_t now = osKernelGetTickCount();
+        *p_timer_hnd = (now != 0U) ? now : 1U;
     }
 }
 
@@ -679,7 +688,7 @@ bool fp_arch_is_timer_elapsed(fp_arch_timer_handle_t *const p_timer_hnd,
     }
 
     uint32_t current_tick = osKernelGetTickCount();
-    uint32_t elapsed_ms = (current_tick - *p_timer_hnd) * 1000 / osKernelGetTickFreq();
+    uint64_t elapsed_ms = ((uint64_t)(current_tick - *p_timer_hnd) * 1000U) / osKernelGetTickFreq();
 
     return elapsed_ms >= elapse_time;
 }
@@ -742,24 +751,26 @@ void fp_arch_assert(const bool cond);
 void fp_arch_break_assert(const bool cond);
 ```
 
+`cond` is the condition that must hold, as with the standard `assert()`: the
+service calls e.g. `fp_arch_assert(NULL != p_ctx)`. A **false** `cond` is the
+violation.
+
 **Implementation Example:**
 ```c
 void fp_arch_assert(const bool cond) {
-    if (cond) {
+    if (!cond) {
         // Log error and halt system
-        printf("FP ASSERT FAILED at %s:%d\n", __FILE__, __LINE__);
-        while(1) { /* Halt */ }
+        printf("FP ASSERT FAILED\n");
+        while (1) { /* Halt */ }
     }
 }
 
 void fp_arch_break_assert(const bool cond) {
-    if (cond) {
-        // Set debugger breakpoint if available
-        #ifdef DEBUG
-            __BKPT(0);  // ARM Cortex-M breakpoint
-        #else
-            fp_arch_assert(cond);
-        #endif
+    if (!cond) {
+#if defined(DEBUG) && defined(__ARM_ARCH)
+        __BKPT(0);  // ARM Cortex-M only: stop in the debugger (CMSIS core header)
+#endif
+        fp_arch_assert(cond);
     }
 }
 ```
@@ -864,9 +875,11 @@ void fp_arch_init_event(void **pp_event) {
 
 bool fp_arch_wait_for_event(void *p_event, const uint32_t timeout_ms) {
     // Implement event waiting
+    return false;
 }
 
-// ... implement other required functions
+// ... implement the other functions declared in fp_arch.h
+// (see "Architecture Interface Implementation" above)
 ```
 
 **Step 3: Configure System Parameters**
@@ -874,6 +887,7 @@ Edit `fp_config.h` to set system limits:
 ```c
 #define MAX_CLIENT_SESSIONS_COUNT ((uint16_t)10)
 #define MAX_SERVER_SESSIONS_COUNT ((uint16_t)5)
+#define MAX_FIDL_COUNT ((uint16_t)5)
 #define ARMED_REQ_TOUT_S ((uint16_t)(15 * 60))
 ```
 
@@ -890,26 +904,30 @@ All examples below assume that the underlying FP transport layer is properly con
 fp_config_user_init();
 
 // Setup dispatch context
-fp_dispatch_info_t disp_ctx;
+fp_dispatch_info_t disp_ctx = { 0 };
 fp_config_user_assign_sys_context(&disp_ctx, FP_CONFIG_SYS_CTX_TYPE_CSP);
 
-// Send synchronous request
+// Request and response frames start with the FP header (fp_msg_hdr_t), which
+// the service fills in; the payload follows it.
 uint8_t request_buffer[64];
 uint8_t response_buffer[64];
 
-fp_cmd_status_t status = fp_disp_client_send_req(
+// Send synchronous request; the response copy never exceeds the given capacity
+fp_cmd_status_t status = fp_disp_client_send_req_bounded(
     &disp_ctx,
     0x1234,                    // interface ID
     0x5678,                    // function ID
-    request_buffer,            // request data
-    sizeof(request_buffer),    // request size
+    FP_FRAME_TYPE_REQ,         // regular request
+    request_buffer,            // request frame (header + payload)
+    sizeof(request_buffer),    // request size, header included
     response_buffer,           // response buffer
+    sizeof(response_buffer),   // response buffer capacity
     NULL,                      // sync request (no callback)
-    5000                       // 5 second timeout
+    5000                       // timeout in milliseconds
 );
 
 if (status == FP_CMD_STATUS_NOERROR) {
-    // Process response_buffer
+    // disp_ctx.data_size holds the number of response bytes delivered
 }
 ```
 
@@ -918,27 +936,47 @@ if (status == FP_CMD_STATUS_NOERROR) {
 #include "fp_disp_server.h"
 #include "fp_registry.h"
 
-// Request handler function
-void my_request_handler(fp_dispatch_info_t *p_disp_ctx, void *p_req_data) {
-    // Process request
-    uint8_t response_data[32];
+#define MY_IFACE_ID ((uint16_t)0x1234)
+#define MY_FUNC_ID  ((uint32_t)0x5678)
 
-    // Prepare response
-    // ...
+// Typed frames start with the FP header (normally generated from the FIDL)
+PACK_STRUCT_BEGIN
+typedef struct { fp_msg_hdr_t hdr; uint32_t value; } my_req_t;
+typedef struct { fp_msg_hdr_t hdr; uint32_t result; } my_resp_t;
+PACK_STRUCT_END
 
-    // Send response
-    fp_disp_server_send_resp(p_disp_ctx, 0x1234, 0x5678,
-                            response_data, sizeof(response_data));
+// Request handler: p_disp_ctx is the request's fp_dispatch_info_t,
+// p_untyped_req the request frame (header + payload)
+static void my_request_handler(void *p_disp_ctx, void *p_untyped_req) {
+    const my_req_t *p_req = (const my_req_t *)p_untyped_req;
+    my_resp_t resp = { .result = p_req->value * 2U };
+
+    // The service fills in the response header (IDs, cmd_id, status)
+    (void)fp_disp_server_send_resp((fp_dispatch_info_t *)p_disp_ctx, MY_IFACE_ID, MY_FUNC_ID,
+                                   (uint8_t *)&resp, sizeof(resp));
 }
 
-// Register FIDL interface
-fidl_if_t my_interface = {
-    .iface_id = 0x1234,
-    .type = FIDL_TYPE_SERVER,
-    .p_req_handler = my_request_handler
+// Function callback in the FIDL registry (normally generated): the dispatcher
+// calls it for every frame of this function
+static void my_func_cbk(fp_dispatch_info_t *p_disp_ctx) {
+    fp_disp_server_handle_req(p_disp_ctx, FP_DISP_SERVER_REQ_TYPE_REGULAR,
+                              &my_request_handler, sizeof(my_req_t));
+}
+
+static const fidl_func_t my_funcs[] = {
+    { .func_id = MY_FUNC_ID, .p_on_func_cbk = &my_func_cbk }
 };
 
-fp_registry_add_fidl_if(&my_interface);
+static const fidl_if_t my_interface = {
+    .version     = 1,
+    .gen_type    = FIDL_TYPE_SERVER,
+    .fidl_if_id  = MY_IFACE_ID,
+    .func_count  = 1,
+    .p_func_list = my_funcs
+};
+
+// At start-up:
+(void)fp_registry_add_fidl_if(&my_interface);
 ```
 
 ### 3. ARM-and-FIRE Example
@@ -975,29 +1013,30 @@ if (arm_status == FP_CMD_STATUS_ARMED) {
 
 **Server Side:**
 ```c
-void critical_operation_handler(fp_dispatch_info_t *p_disp_ctx, void *p_req_data) {
-    // This handler automatically supports ARM-and-FIRE
-    // The FP service handles the ARM/FIRE logic
+#define CRITICAL_FUNC_ID ((uint32_t)0x5679)
 
-    // This code only executes after successful FIRE
+// Runs only for a FIRE request whose data matches the armed request. The
+// service answers ARM (ARMED), DISARM (DISARMED) and mismatching FIRE data
+// (DATA_INTEGRITY_ERR) itself.
+static void critical_operation_handler(void *p_disp_ctx, void *p_untyped_req) {
+    (void)p_untyped_req;
     printf("Executing critical operation\n");
 
     // Perform the actual operation
     // ...
 
-    // Send response
-    uint8_t response[16] = "Operation complete";
-    fp_disp_server_send_resp(p_disp_ctx, 0x1234, 0x5678,
-                            response, sizeof(response));
+    my_resp_t resp = { .result = 0U };
+    (void)fp_disp_server_send_resp((fp_dispatch_info_t *)p_disp_ctx, MY_IFACE_ID, CRITICAL_FUNC_ID,
+                                   (uint8_t *)&resp, sizeof(resp));
 }
 
-// Register with ARM-and-FIRE support
-fidl_if_t critical_interface = {
-    .iface_id = 0x1234,
-    .type = FIDL_TYPE_SERVER,
-    .p_req_handler = critical_operation_handler,
-    .req_type = FP_DISP_SERVER_REQ_TYPE_ARM_AND_FIRE  // Enable ARM-and-FIRE
-};
+// ARM-and-FIRE is selected per function, when the request is dispatched.
+// Register it in the interface's fidl_func_t list as shown above:
+//   { .func_id = CRITICAL_FUNC_ID, .p_on_func_cbk = &critical_func_cbk }
+static void critical_func_cbk(fp_dispatch_info_t *p_disp_ctx) {
+    fp_disp_server_handle_req(p_disp_ctx, FP_DISP_SERVER_REQ_TYPE_ARM_AND_FIRE,
+                              &critical_operation_handler, sizeof(my_req_t));
+}
 ```
 
 ## 📊 Performance Considerations
@@ -1057,6 +1096,8 @@ fidl_if_t critical_interface = {
 #define FP_ARCH_TRACE_INFO(format, ...)  printf("[FP_INFO] " format "\n", ##__VA_ARGS__)
 #define FP_ARCH_TRACE_ERROR(format, ...) printf("[FP_ERROR] " format "\n", ##__VA_ARGS__)
 ```
+`FP_ARCH_TRACE_WARN` and `FP_ARCH_TRACE_FATAL` must stay defined as well
+(empty is fine).
 
 #### Session Monitoring
 ```c
@@ -1092,10 +1133,27 @@ fp_cmd_status_t fp_disp_client_send_req(
     const uint32_t timeout
 );
 
-void fp_disp_client_handle_resp(
+// Same, but a synchronous response is never copied beyond resp_max_size bytes
+fp_cmd_status_t fp_disp_client_send_req_bounded(
+    fp_dispatch_info_t *p_disp_ctx,
+    const uint16_t iface_id,
+    const uint32_t func_id,
+    const fp_frame_type_t frame_type,
+    uint8_t *const p_req,
+    const uint32_t req_size,
+    uint8_t *const p_resp,
+    const uint32_t resp_max_size,
+    fp_generic_response_handler_t p_resp_handler,
+    const uint32_t timeout
+);
+
+bool fp_disp_client_handle_resp(
     fp_dispatch_info_t *p_disp_ctx,
     const uint32_t resp_type_size
 );
+
+// Responses whose interface has no registered client
+bool fp_disp_client_handle_resp_unmatched(fp_dispatch_info_t *p_disp_ctx);
 
 void fp_disp_client_handle_bcast(
     fp_dispatch_info_t *p_disp_ctx,
@@ -1124,10 +1182,10 @@ bool fp_disp_server_send_resp(
 
 #### Registry API
 ```c
-fp_cmd_status_t fp_registry_add_fidl_if(const fidl_if_t *const p_fidl_if);
-fp_cmd_status_t fp_registry_remove_fidl_if(const fidl_if_t *const p_fidl_if);
-const fidl_if_t *fp_registry_get_fidl_if_by_id(const uint16_t iface_id,
-                                               const fidl_type_t fidl_type);
+bool fp_registry_add_fidl_if(const fidl_if_t *const p_handler);
+bool fp_registry_remove_fidl_if(const fidl_if_t *const p_handler);
+const fidl_if_t *fp_registry_get_fidl_if_by_id(const uint16_t fidl_if_id,
+                                               const fidl_gen_type_t gen_type);
 ```
 
 #### Protocol Utilities
@@ -1136,6 +1194,9 @@ void fp_proto_get_func_attributes(const fp_msg_hdr_t *const p_fp_hdr,
                                  fp_proto_func_attr_t *const p_attr);
 void fp_proto_set_frame_type(fp_msg_hdr_t *const p_fp_hdr,
                              const fp_frame_type_t frame_type);
+void fp_proto_set_function_type(fp_msg_hdr_t *const p_fp_hdr,
+                                const uint32_t func_id,
+                                const fp_frame_type_t frame_type);
 void fp_proto_set_func_id(fp_msg_hdr_t *const p_fp_hdr,
                           const uint32_t func_id);
 bool fp_proto_is_bare_func_id_matching(const uint32_t func_id_1,

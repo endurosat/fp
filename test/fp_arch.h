@@ -163,14 +163,14 @@ void fp_arch_unlock_section(void *const p_lock);
 
 /** @brief Performs a platform-specific assert check
  *
- *  @param[in] cond assert condition (if true - an assert violation is triggered)
+ *  @param[in] cond condition that must hold, as with the standard assert() (if false - an assert violation is triggered)
  */
 void fp_arch_assert(const bool cond);
 
 /** @brief Performs a platform-specific assert check which automatically sets a debugger breakpoint if
  *  supported by the system.
  *
- *  @param[in] cond assert condition (if true - an assert violation is triggered)
+ *  @param[in] cond condition that must hold, as with the standard assert() (if false - an assert violation is triggered)
  */
 void fp_arch_break_assert(const bool cond);
 

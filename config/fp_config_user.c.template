@@ -27,6 +27,8 @@ static const osMutexAttr_t fp_mutex_attr = {
 
 static osMutexId_t rs485_os_locks[FP_LOCK_SECTION_MAX];
 
+static void fp_config_user_task(void *p_args);
+
 /** @brief RS485 system-specific send function which transfers the FP frame over a RS485 bus
  *
  *  @param[in] p_disp_ctx pointer to an FP dispatch information structure
@@ -40,11 +42,13 @@ static bool fp_send_rs485(void *p_disp_ctx)
     fp_dispatch_info_t *p_disp_info = (fp_dispatch_info_t *)p_disp_ctx;
 
     // perform RS485-specific send operations here...
+    (void)p_disp_info;
+    return false;
 }
 
 static fp_dispatch_sys_context_t fp_sys_contexts[FP_CONFIG_SYS_CTX_TYPE_MAX] = {
     [FP_CONFIG_SYS_CTX_TYPE_LOCAL] = { 0 },
-    [FP_CONFIG_SYS_CTX_TYPE_RS485] = { .p_section_locks = NULL, // initialize this to an array of OS mutex handles
+    [FP_CONFIG_SYS_CTX_TYPE_RS485] = { .p_section_locks = { NULL }, // filled with OS mutex handles in fp_config_user_init()
                                        .p_send          = &fp_send_rs485 },
     [FP_CONFIG_SYS_CTX_TYPE_CSP]   = { 0 }
 };
@@ -63,9 +67,9 @@ void fp_config_user_init(void)
 
     for (uint8_t lock_id = 0; lock_id < FP_LOCK_SECTION_MAX; lock_id++)
     {
-        rs485_os_locks[lock_id] = osMutexNew(&mutex_attr);
+        rs485_os_locks[lock_id] = osMutexNew(&fp_mutex_attr);
         fp_arch_assert(NULL != rs485_os_locks[lock_id]);
-        fp_sys_contexts[FP_CONFIG_SYS_CTX_TYPE_RS485].p_section_locks = (void *)&rs485_os_locks[lock_id];
+        fp_sys_contexts[FP_CONFIG_SYS_CTX_TYPE_RS485].p_section_locks[lock_id] = (void *)rs485_os_locks[lock_id];
     }
 
     fp_disp_session_mgr_init(&fp_sys_contexts[FP_CONFIG_SYS_CTX_TYPE_RS485]);
@@ -73,7 +77,6 @@ void fp_config_user_init(void)
 
 void fp_config_user_assign_sys_context(fp_dispatch_info_t *p_disp_ctx, fp_config_sys_ctx_type_t sys_ctx_type)
 {
-    fp_dispatch_sys_context_t *p_ctx = NULL;
 
     fp_arch_assert(NULL != p_disp_ctx);
     fp_arch_assert(sys_ctx_type < FP_CONFIG_SYS_CTX_TYPE_MAX);
