@@ -67,6 +67,25 @@ static inline bool fp_disp_client_session_is_matching(const fp_disp_session_base
 static void fp_disp_client_session_track(fp_dispatch_sys_context_t *const p_sys_ctx,
                                          fp_disp_session_base_t *const    p_sess);
 
+/** @brief Disarms the release handler of an asynchronous request whose session is being closed
+ *
+ *  @param[in] p_sess pointer to the client session being closed
+ *
+ *  @return the release handler to call, or NULL; the session manager calls it after releasing the lock
+ *
+ *  @note Called by the session manager after the transport close callback, under the client-session lock.
+ */
+static fp_session_released_handler_t fp_disp_client_session_release(fp_disp_session_base_t *const p_sess);
+
+/** @brief Tells the application that an asynchronous request timed out (response handler with
+ *  FP_CMD_STATUS_TIMEOUT)
+ *
+ *  @param[in] p_sess pointer to the timed-out client session
+ *
+ *  @note Called by the session tracker without any fp lock held, before the session is closed.
+ */
+static void fp_disp_client_session_timeout(fp_disp_session_base_t *const p_sess);
+
 /*
 ***************************************************************************************************
 * EXTERNAL VARIABLES DEFINITION
@@ -77,6 +96,8 @@ const fp_disp_session_attributes_t fp_disp_client_sess_attrib = {
     .p_init_func = &fp_disp_client_session_init,
     .p_is_matching = &fp_disp_client_session_is_matching,
     .p_track_session = &fp_disp_client_session_track,
+    .p_release_func = &fp_disp_client_session_release,
+    .p_timeout_func = &fp_disp_client_session_timeout,
     .sess_type = FP_DISP_SESSION_TYPE_CLIENT
     // clang-format on
 };
@@ -205,6 +226,10 @@ static fp_cmd_status_t fp_disp_client_send_req_impl(fp_dispatch_info_t          
             void *p_section_lock = p_disp_ctx->p_sys_ctx->p_section_locks[FP_LOCK_SECTION_CLIENT_SESSION];
             if (fp_arch_lock_section(p_section_lock))
             {
+                // armed only for an accepted request: every error return leaves the
+                // communication parameters with the caller
+                p_client_session->p_released_handler = p_disp_ctx->p_on_released;
+
                 fp_arch_start_timer(&p_client_session->base.timer_hnd);
                 atomic_store(&p_client_session->base.state, FP_SESSION_STATE_ACTIVE);
                 fp_arch_unlock_section(p_section_lock);
@@ -492,9 +517,10 @@ static inline void fp_disp_client_session_init(fp_disp_session_base_t *const p_s
 
     fp_disp_client_session_t *p_client_session = (fp_disp_client_session_t *)p_sess;
 
-    p_client_session->p_resp_data      = NULL;
-    p_client_session->p_user_handler   = NULL;
-    p_client_session->req_type         = FP_REQ_TYPE_MAX;
+    p_client_session->p_resp_data        = NULL;
+    p_client_session->p_user_handler     = NULL;
+    p_client_session->p_released_handler = NULL;
+    p_client_session->req_type           = FP_REQ_TYPE_MAX;
     // unlike resp_data_max_size (the once-set pool capacity), these are per-request and must be reset
     p_client_session->resp_buf_user_max = 0U;
     p_client_session->resp_data_size    = 0U;
@@ -537,23 +563,42 @@ static void fp_disp_client_session_track(fp_dispatch_sys_context_t *const p_sys_
             p_sys_ctx->client_metrics.timed_out_session_cnt++;
         }
 
-        fp_generic_response_handler_t p_user_handler = p_client_sess->p_user_handler;
-
-        // if we have a response handler assigned, inform user that the response timed-out...
-        if (NULL != p_user_handler)
-        {
-            fp_dispatch_info_t temp_ctx = { 0 };
-
-            // transfer the comm params to a temporary context so that it can be accessed by the
-            // response handler
-            temp_ctx.p_comm_params = p_sess->p_comm_params;
-
-            (*p_user_handler)(&temp_ctx, NULL, FP_CMD_STATUS_TIMEOUT);
-        }
-
-        // ...and release the session
-        FP_ARCH_TRACE_DEBUG("Session close (timeout): session_id=%p, request='%u:%lu:%u'",
-                            p_sess, p_sess->req_fp_hdr.iface_id, p_sess->req_fp_hdr.func_id, p_sess->req_fp_hdr.cmd_id);
-        fp_disp_session_mgr_close_session(p_sys_ctx, p_sess);
+        // called under the client-session lock: only mark the session. The session tracker calls the
+        // response handler (fp_disp_client_session_timeout) and closes the session after releasing the lock.
+        p_sess->deferred_action = (uint8_t)FP_SESSION_DEFERRED_TIMEOUT;
+        atomic_store(&p_sess->state, FP_SESSION_STATE_DEFERRED);
     }
+}
+
+static void fp_disp_client_session_timeout(fp_disp_session_base_t *const p_sess)
+{
+    fp_arch_assert(NULL != p_sess);
+
+    fp_disp_client_session_t const *p_client_sess  = (fp_disp_client_session_t const *)p_sess;
+    fp_generic_response_handler_t   p_user_handler = p_client_sess->p_user_handler;
+
+    // if we have a response handler assigned, inform user that the response timed-out
+    if (NULL != p_user_handler)
+    {
+        fp_dispatch_info_t temp_ctx = { 0 };
+
+        // transfer the comm params to a temporary context so that it can be accessed by the
+        // response handler
+        temp_ctx.p_comm_params = p_sess->p_comm_params;
+
+        (*p_user_handler)(&temp_ctx, NULL, FP_CMD_STATUS_TIMEOUT);
+    }
+}
+
+static fp_session_released_handler_t fp_disp_client_session_release(fp_disp_session_base_t *const p_sess)
+{
+    fp_arch_assert(NULL != p_sess);
+
+    fp_disp_client_session_t     *p_client_session = (fp_disp_client_session_t *)p_sess;
+    fp_session_released_handler_t p_handler        = p_client_session->p_released_handler;
+
+    // disarm so that the handler runs exactly once; the session manager calls it after the unlock
+    p_client_session->p_released_handler = NULL;
+
+    return p_handler;
 }

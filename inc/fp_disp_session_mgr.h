@@ -65,8 +65,22 @@ typedef enum
     FP_SESSION_STATE_INACTIVE = 0, /**< Session is not in use (available for allocation) */
     FP_SESSION_STATE_OPENED   = 1, /**< Session is allocated but timer not yet started */
     FP_SESSION_STATE_ACTIVE   = 2, /**< Session is active with timer running */
+    FP_SESSION_STATE_DEFERRED = 3, /**< Client session marked by the session tracker under the lock; the tracker
+                                        carries out its @ref fp_session_deferred_action_t after releasing the lock */
     FP_SESSION_STATE_MAX           /**< Range checking value */
 } fp_session_state_t;
+
+/** @brief What the session tracker does with a @ref FP_SESSION_STATE_DEFERRED client session once it has
+ *  released the client-session lock
+ */
+typedef enum
+{
+    FP_SESSION_DEFERRED_NONE    = 0, /**< the session is not deferred */
+    FP_SESSION_DEFERRED_DELIVER = 1, /**< call the transport's p_deliver callback, then close or reactivate */
+    FP_SESSION_DEFERRED_TIMEOUT = 2, /**< call the response handler with FP_CMD_STATUS_TIMEOUT, then close */
+    FP_SESSION_DEFERRED_CLOSE   = 3, /**< close the session (retried on the next pass if the close cannot take the lock) */
+    FP_SESSION_DEFERRED_MAX          /**< Range checking value */
+} fp_session_deferred_action_t;
 /** @brief Generic typedef for a request handler which doesn't specify the actual request data type
  *  in order to support generic handling in the FP dispatcher instead of inside the generated code.
  *
@@ -93,12 +107,13 @@ typedef struct
  */
 typedef struct
 {
-    _Atomic(fp_session_state_t) state;          /**< atomic session state */
-    uint32_t                    timeout;        /**< response timeout in milliseconds */
-    fp_arch_timer_handle_t      timer_hnd;      /**< timer handle to use for session timeout tracking */
-    fp_msg_hdr_t                req_fp_hdr;     /**< FP header specifying the executed request (used to match to the same request if received again) */
-    const void                 *p_session_attr; /**< field of type @ref fp_disp_session_attributes_t which contains attributes specific to the type of session (e.g. client or server) */
-    void                       *p_comm_params;  /**< pointer to a user-specific communication parameters which must be preserved along with the specific FP dispatch context (not used by FP-related functions but can be utilized by the p_on_fp_send_cbk function to know how to send the data to the physical bus) */
+    _Atomic(fp_session_state_t) state;           /**< atomic session state */
+    uint32_t                    timeout;         /**< response timeout in milliseconds */
+    fp_arch_timer_handle_t      timer_hnd;       /**< timer handle to use for session timeout tracking */
+    fp_msg_hdr_t                req_fp_hdr;      /**< FP header specifying the executed request (used to match to the same request if received again) */
+    const void                 *p_session_attr;  /**< field of type @ref fp_disp_session_attributes_t which contains attributes specific to the type of session (e.g. client or server) */
+    void                       *p_comm_params;   /**< pointer to a user-specific communication parameters which must be preserved along with the specific FP dispatch context (not used by FP-related functions but can be utilized by the p_on_fp_send_cbk function to know how to send the data to the physical bus) */
+    uint8_t                     deferred_action; /**< a @ref fp_session_deferred_action_t value; meaningful only in state @ref FP_SESSION_STATE_DEFERRED */
 } fp_disp_session_base_t;
 
 /** @brief FP server session context used to track the reception of special types of requests (such as fire-and-arm) */
@@ -128,11 +143,35 @@ typedef void (*fp_generic_response_handler_t)(void                 *p_disp_ctx,
                                               uint8_t              *p_untyped_resp,
                                               const fp_cmd_status_t cmd_status);
 
+/** @brief Release handler of an asynchronous client request.
+ *
+ *  fp calls it exactly once per accepted asynchronous request, when the request's session has been
+ *  closed: after the transport close callback (@ref fp_user_session_callbacks_t::p_close). From this
+ *  call on, fp and the transport no longer use @p p_comm_params, so the application may reuse the
+ *  request context behind it.
+ *
+ *  The session is closed after the response only if the transport's p_track or p_deliver callback
+ *  returns FP_DISP_TRACK_ACTION_CLOSE_SESSION; otherwise it is closed at the request timeout, after a
+ *  second response handler call with FP_CMD_STATUS_TIMEOUT. If the session tracker cannot take the
+ *  client-session lock for the close, it retries on its next pass, so the handler runs later.
+ *
+ *  The handler gets no other argument, so @p p_comm_params is how the application identifies the
+ *  request: give each in-flight asynchronous request its own non-NULL p_comm_params that maps to
+ *  exactly one request context, and never share it between requests in flight.
+ *
+ *  @param[in] p_comm_params the communication parameters the request was sent with
+ *
+ *  @note Runs without any fp lock held, on the thread that closes the session (normally the one that
+ *  calls @ref fp_disp_session_mgr_track_sessions). It may take application locks and call fp.
+ */
+typedef void (*fp_session_released_handler_t)(void *p_comm_params);
+
 /** @brief FP client session context used to track the reception of a response for an issued client request */
 typedef struct
 {
     fp_disp_session_base_t        base;               /**< base session context data (must always be the first field here to enable usage of fp_disp_session_base_t pointers to handle client/server-specific session structs) */
     fp_generic_response_handler_t p_user_handler;     /**< pointer to a user-registered response handler */
+    fp_session_released_handler_t p_released_handler; /**< release handler of an accepted asynchronous request (NULL when none or after it ran) */
     fp_req_type_t                 req_type;           /**< indicate the type of request performed by the user to properly handle response data transfer */
     void                         *p_session_event;    /**< pointer to a session event variable used to implement blocking for synchronous FP requests */
     uint8_t                      *p_resp_data;        /**< in case of synchronous requests, this is a pointer to the buffer to copy the received response data to (used by fp_disp to deliver the data to the original user thread) */
@@ -158,6 +197,8 @@ typedef enum
 {
     FP_DISP_TRACK_ACTION_KEEP_SESSION_ACTIVE = 0, /**< Keep the session active and continue tracking */
     FP_DISP_TRACK_ACTION_CLOSE_SESSION       = 1, /**< Close the session */
+    FP_DISP_TRACK_ACTION_DELIVER             = 2, /**< p_track only, client sessions only: a response is ready; call
+                                                       p_deliver for it after the client-session lock is released */
     FP_DISP_TRACK_ACTION_MAX                      /**< value used for range checking */
 } fp_session_track_action_t;
 
@@ -200,10 +241,15 @@ typedef bool (*p_user_send_func_t)(void *p_disp_ctx);
  */
 typedef void *(*p_user_alloc_buffer_func_t)(uint32_t buf_size, uint8_t **pp_data);
 
-/** @brief Structure containing all user-provided session lifecycle callbacks */
+/** @brief Structure containing all user-provided session lifecycle callbacks
+ *
+ *  These are transport callbacks. p_open, p_track and p_close run under the session lock of the
+ *  session's type, so they must not call application code or @ref fp_disp_execute. p_deliver runs
+ *  without any fp lock held.
+ */
 typedef struct
 {
-    /** @brief Called after a session is opened and fully initialized
+    /** @brief Called after a session is opened and fully initialized (under the session lock)
      *
      *  @param[in] p_sess Pointer to the session data that was opened
      *
@@ -219,6 +265,11 @@ typedef struct
      *  @return A value from the @ref fp_session_track_action_t enumeration:
      *          - @ref KEEP_SESSION_ACTIVE to keep the session active and continue tracking
      *          - @ref CLOSE_SESSION to close the session
+     *          - @ref FP_DISP_TRACK_ACTION_DELIVER (client sessions, with p_deliver registered) when a response
+     *            has been received: keep it in the communication parameters and dispatch it from p_deliver
+     *
+     *  @note Runs under the session lock. Do not call @ref fp_disp_execute from here: it would run the
+     *  application's response handler under the lock. Return FP_DISP_TRACK_ACTION_DELIVER instead.
      *
      *  @warning Do not close the session from this function! Leave that to the standard handlers. Use it only to poll the status
      *  of any active connections or read data from them each time before FP session monitoring is performed. The focus of this
@@ -231,8 +282,21 @@ typedef struct
      *  session which are part of the user-specific communication handling of the session, e.g. close active network connections or similar actions.
      *
      *  @param[in] p_sess Pointer to the session data that is being closed
+     *
+     *  @note Runs under the session lock.
      */
     void (*p_close)(fp_disp_session_base_t *const p_sess);
+
+    /** @brief Optional. Called by the session tracker without any fp lock held, for a client session for
+     *  which p_track returned FP_DISP_TRACK_ACTION_DELIVER. Dispatch the received response here with
+     *  @ref fp_disp_execute, which runs the application's response handler.
+     *
+     *  @param[in] p_sess Pointer to the client session the response was received for
+     *
+     *  @return FP_DISP_TRACK_ACTION_CLOSE_SESSION to close the session (the response was delivered), or
+     *          FP_DISP_TRACK_ACTION_KEEP_SESSION_ACTIVE to keep tracking it (e.g. the frame did not match)
+     */
+    fp_session_track_action_t (*p_deliver)(fp_disp_session_base_t *const p_sess);
 } fp_user_session_callbacks_t;
 
 /** @brief System-specific dispatch context used to handle physical send operations and
@@ -248,6 +312,7 @@ typedef struct
     fp_disp_session_metrics_t   server_metrics;                                  /**< standard runtime metrics information for servers */
     fp_disp_session_metrics_t   client_metrics;                                  /**< standard runtime metrics information for clients */
     fp_user_session_callbacks_t session_callbacks;                               /**< user-provided callbacks for session lifecycle events */
+    bool                        client_track_locked;                             /**< internal: true while the session tracker scans the client pool under the client-session lock */
 } fp_dispatch_sys_context_t;
 
 /** @brief Session-specific initialization function pointer type
@@ -255,6 +320,25 @@ typedef struct
  *  @param[in] p_sess pointer to the session base data used to perform initialization of base data fields
  */
 typedef void (*p_init_func_t)(fp_disp_session_base_t *const p_sess);
+
+/** @brief Session-specific release function pointer type. Called under the session lock when a session
+ *  is closed, after the transport close callback and before the session is reinitialised. It disarms the
+ *  session's release handler and returns it; the session manager calls the handler after the lock is
+ *  released.
+ *
+ *  @param[in] p_sess pointer to the session base data of the session being closed
+ *
+ *  @return the release handler to call once the lock is released, or NULL
+ */
+typedef fp_session_released_handler_t (*p_release_func_t)(fp_disp_session_base_t *const p_sess);
+
+/** @brief Session-specific timeout notification function pointer type. Called by the session tracker
+ *  without any fp lock held, for a session it marked with @ref FP_SESSION_DEFERRED_TIMEOUT, before the
+ *  session is closed.
+ *
+ *  @param[in] p_sess pointer to the session base data of the timed-out session
+ */
+typedef void (*p_timeout_func_t)(fp_disp_session_base_t *const p_sess);
 
 /** @brief Match function pointer type. Used to provide condition matching on active sessions in the pool.
  *
@@ -285,6 +369,8 @@ typedef struct
     p_init_func_t                p_init_func;     /**< pointer to a session-specific initialization function */
     p_is_matching_t              p_is_matching;   /**< match function to use when searching for active sessions in the pool */
     p_track_session_t            p_track_session; /**< session-type-specific track function */
+    p_release_func_t             p_release_func;  /**< session-type-specific release function (may be NULL) */
+    p_timeout_func_t             p_timeout_func;  /**< session-type-specific timeout notification for deferred timeouts (may be NULL) */
     const fp_disp_session_type_t sess_type;       /**< type of the session */
 } fp_disp_session_attributes_t;
 
@@ -322,17 +408,28 @@ FP_API fp_disp_session_base_t *fp_disp_session_mgr_find_session(fp_dispatch_sys_
 
 /** @brief Release a context matching a specified session handle
  *
+ *  Calls the transport close callback under the session lock, then, after the lock is released, the
+ *  release handler of an accepted asynchronous client request.
+ *
  *  @param[in] p_sys_ctx pointer to a valid FP system context
  *  @param[in] p_session pointer to a session from the pool to be released
+ *
+ *  @warning Do not call this function while holding the client-session lock: the release handler would
+ *  then run under it.
  */
 FP_API void fp_disp_session_mgr_close_session(fp_dispatch_sys_context_t *const p_sys_ctx,
                                               fp_disp_session_base_t *const    p_session);
 
 /** @brief Handle session timeouts for all active sessions of any type
  *
+ *  Client sessions are tracked in two phases. Under the client-session lock, the tracker calls p_track and
+ *  checks the timeouts, and marks each session that needs action as @ref FP_SESSION_STATE_DEFERRED. After
+ *  releasing the lock, it calls p_deliver, the response handler (for timeouts) and the close, so that no
+ *  application callback runs under the lock.
+ *
  *  @param[in] p_sys_ctx pointer to a valid FP system context
  *
- *  @note The function shall be called regularly or be mapped to its own periodic OS task.
+ *  @note The function shall be called regularly or be mapped to its own periodic OS task, from one thread.
  */
 FP_API void fp_disp_session_mgr_track_sessions(fp_dispatch_sys_context_t *const p_sys_ctx);
 
@@ -344,7 +441,11 @@ FP_API void fp_disp_session_mgr_track_sessions(fp_dispatch_sys_context_t *const 
  *  @note The registered callbacks will be called at appropriate points in the session lifecycle:
  *        - p_open: after a session is opened and fully initialized
  *        - p_track: for each active session during session tracking, before the standard session-specific tracking function
+ *        - p_deliver: during session tracking, after the client-session lock is released, for each client
+ *          session for which p_track returned FP_DISP_TRACK_ACTION_DELIVER
  *        - p_close: for each session that is being closed, before the session is reinitialized
+ *        - after p_close and the lock release, the release handler of an accepted asynchronous client
+ *          request (@ref fp_dispatch_info_t::p_on_released), if one was set
  */
 FP_API void fp_disp_session_mgr_register_callbacks(fp_dispatch_sys_context_t *const         p_sys_ctx,
                                                    const fp_user_session_callbacks_t *const p_callbacks);

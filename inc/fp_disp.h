@@ -48,12 +48,13 @@ extern "C" {
  */
 typedef struct
 {
-    void                      *p_comm_params;   /**< pointer to a user-specific communication parameters which must be preserved along with the specific FP dispatch context (not used by FP-related functions but can be utilized by the p_on_fp_send_cbk function to know how to send the data to the physical bus) */
-    uint8_t                   *p_data;          /**< pointer to the FP data (starting with the FP header) */
-    uint32_t                   data_size;       /**< size of the data referred to by @ref p_data (in bytes) */
-    void                      *p_ext_buf_ref;   /**< an untyped reference to an external buffer if such was allocated through p_sys_ctx->p_alloc_buf function (this depends on the deployment configuration for the generated code) */
-    fp_dispatch_sys_context_t *p_sys_ctx;       /**< pointer to the system dispatch context used to handle the data for an FP transaction */
-    fp_disp_session_base_t    *p_assigned_sess; /**< pointer to the session context assigned to this FP transaction */
+    void                         *p_comm_params;   /**< pointer to a user-specific communication parameters which must be preserved along with the specific FP dispatch context (not used by FP-related functions but can be utilized by the p_on_fp_send_cbk function to know how to send the data to the physical bus) */
+    uint8_t                      *p_data;          /**< pointer to the FP data (starting with the FP header) */
+    uint32_t                      data_size;       /**< size of the data referred to by @ref p_data (in bytes) */
+    void                         *p_ext_buf_ref;   /**< an untyped reference to an external buffer if such was allocated through p_sys_ctx->p_alloc_buf function (this depends on the deployment configuration for the generated code) */
+    fp_dispatch_sys_context_t    *p_sys_ctx;       /**< pointer to the system dispatch context used to handle the data for an FP transaction */
+    fp_disp_session_base_t       *p_assigned_sess; /**< pointer to the session context assigned to this FP transaction */
+    fp_session_released_handler_t p_on_released;   /**< optional; asynchronous client requests only: called once after the request's session is closed, see @ref fp_session_released_handler_t; zero-initialise the context (or set this field explicitly) before every asynchronous request, because fp calls whatever pointer it holds */
 } fp_dispatch_info_t;
 
 /*

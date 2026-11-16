@@ -12,6 +12,7 @@ class fp_disp_session_base_t {
     +fp_msg_hdr_t req_fp_hdr
     +const void *p_session_attr
     +void *p_comm_params
+    +uint8_t deferred_action
     --
     General session handling
     Used for session management
@@ -37,6 +38,7 @@ class fp_disp_server_session_t {
 class fp_disp_client_session_t {
     +fp_disp_session_base_t base
     +fp_generic_response_handler_t p_user_handler
+    +fp_session_released_handler_t p_released_handler
     +fp_req_type_t req_type
     +void *p_session_event
     +uint8_t *p_resp_data
@@ -45,6 +47,7 @@ class fp_disp_client_session_t {
     +fp_disp_client_session_init()
     +fp_disp_client_session_is_matching()
     +fp_disp_client_session_track()
+    +fp_disp_client_session_release()
     --
     Request/response matching
     Sync/async support
@@ -56,6 +59,8 @@ class fp_disp_session_attributes_t {
     +p_init_func_t p_init_func
     +p_is_matching_t p_is_matching
     +p_track_session_t p_track_session
+    +p_release_func_t p_release_func
+    +p_timeout_func_t p_timeout_func
     +const fp_disp_session_type_t sess_type
     --
     Session-specific behavior
@@ -75,6 +80,8 @@ object fp_disp_server_sess_attrib {
     p_init_func = fp_disp_server_session_init
     p_is_matching = fp_disp_server_session_is_matching
     p_track_session = fp_disp_server_session_track
+    p_release_func = NULL
+    p_timeout_func = NULL
 }
 
 object fp_disp_client_sess_attrib {
@@ -82,6 +89,8 @@ object fp_disp_client_sess_attrib {
     p_init_func = fp_disp_client_session_init
     p_is_matching = fp_disp_client_session_is_matching
     p_track_session = fp_disp_client_session_track
+    p_release_func = fp_disp_client_session_release
+    p_timeout_func = fp_disp_client_session_timeout
 }
 
 fp_disp_session_attributes_t <.. fp_disp_server_sess_attrib : instance
@@ -91,7 +100,7 @@ note top of fp_disp_session_base_t
   **Base Session Class**
 
   Provides common session functionality:
-  • Atomic session state management (INACTIVE/OPENED/ACTIVE)
+  • Atomic session state management (INACTIVE/OPENED/ACTIVE/DEFERRED)
   • Timeout handling with timer
   • Request header matching
   • Communication parameters
@@ -123,7 +132,7 @@ note right of fp_disp_client_session_t
   • Event-based synchronization
   • Response handler callbacks
   
-  Lifecycle: Request → Waiting → Response
+  Lifecycle: Request → Waiting → Response → Closed (release handler runs after p_close)
 end note
 
 note bottom of fp_disp_session_attributes_t
@@ -134,6 +143,8 @@ note bottom of fp_disp_session_attributes_t
   • Initialization
   • Session matching
   • Session tracking
+  • Release on close (p_release_func; NULL for server sessions)
+  • Deferred timeout notification (p_timeout_func; NULL for server sessions)
   
   Each session type has its own
   attribute instance with specific

@@ -503,13 +503,18 @@ The FP service maintains sophisticated session tracking for both client and serv
 1. Created when sending request
 2. Tracks timeout for response
 3. Matches incoming response by `cmd_id`
-4. Closed when response received or timeout
+4. Closed on timeout, or, for a response, when the transport's `p_track` or
+   `p_deliver` callback returns `FP_DISP_TRACK_ACTION_CLOSE_SESSION` (a synchronous
+   request is closed by the sending thread after the response)
+5. For an asynchronous request, the release handler runs after the transport close
+   callback (see [Asynchronous Requests](#asynchronous-requests))
 
 **Key Fields:**
 ```c
 typedef struct {
     fp_disp_session_base_t        base;               // Common session data (first field)
     fp_generic_response_handler_t p_user_handler;     // Response callback (async only)
+    fp_session_released_handler_t p_released_handler; // Release handler (async only, may be NULL)
     fp_req_type_t                 req_type;           // SYNC or ASYNC
     void                         *p_session_event;    // Event for sync waiting
     uint8_t                      *p_resp_data;        // Response buffer (sync only)
@@ -931,6 +936,129 @@ if (status == FP_CMD_STATUS_NOERROR) {
 }
 ```
 
+#### Asynchronous Requests
+
+An asynchronous request (a non-NULL response handler) has two handlers:
+
+- The **response handler** delivers the result: the response, a timeout
+  (`FP_CMD_STATUS_TIMEOUT`) or a protocol violation. When it runs, the request's
+  session still owns `p_comm_params`, and the transport has not closed its
+  connection yet. Do not free or reuse the request context here.
+- The **release handler** (`fp_dispatch_info_t::p_on_released`, optional) runs exactly
+  once, when the request's session is closed: after the transport close callback
+  (`fp_user_session_callbacks_t::p_close`), with the request's `p_comm_params`.
+  From this call on, the service and the transport no longer use them, so this is
+  the only point where a pooled request context may be reused.
+
+The service never calls the release handler or the timeout response handler while
+it holds a session lock. Both may take application locks and call FP functions, for
+example to send the next request. The session tracker
+(`fp_disp_session_mgr_track_sessions`) works in two phases: under the client-session
+lock it only decides what happens to each session, and it calls the application
+after it has released the lock.
+
+When the session is closed depends on the transport:
+
+- A transport whose `p_track` callback reports a received response with
+  `FP_DISP_TRACK_ACTION_DELIVER` gets its `p_deliver` callback called after the lock
+  is released; `p_deliver` dispatches the response and returns
+  `FP_DISP_TRACK_ACTION_CLOSE_SESSION`. The order is: response handler, `p_close`,
+  release handler, and the response handler runs without the lock (see
+  [Transport Session Callbacks](#transport-session-callbacks)).
+- A transport whose `p_track` callback dispatches the response itself and returns
+  `FP_DISP_TRACK_ACTION_CLOSE_SESSION` still works, in the same order, but its
+  response handler then runs under the client-session lock.
+- The service does not close an asynchronous session when it delivers a response
+  that a transport receive thread passed to `fp_disp_execute`. With such a transport
+  the session stays active until its timeout. The response handler then runs a
+  second time with `FP_CMD_STATUS_TIMEOUT`, and the release handler runs after that.
+  The request context stays in use for the full timeout.
+- If the tracker cannot take the client-session lock for the close, the session
+  stays marked for closing and the next tracking pass retries the close. Until then
+  the request context stays in use, as does the transport connection.
+
+The release handler runs only for a request that `fp_disp_client_send_req*` accepted
+(it returned `FP_CMD_STATUS_NOERROR`). After any error return the context is still
+the caller's. Synchronous requests ignore the field, and a zeroed dispatch context
+keeps the behaviour without a release handler.
+
+Two requirements follow from this:
+
+- The service calls whatever pointer `p_on_released` holds. Zero-initialise the
+  dispatch context, or set the field explicitly, before every asynchronous request;
+  a context on the stack or the heap that only got its system context assigned
+  holds garbage there.
+- The release handler gets only `p_comm_params`, so that pointer is how the
+  application finds the request. Give each in-flight asynchronous request its own
+  non-NULL `p_comm_params` that maps to exactly one request context, and never
+  share it between requests in flight.
+
+```c
+typedef struct {
+    fp_dispatch_info_t disp_ctx;
+    my_csp_params_t    comm_params; // application-defined transport parameters
+    bool               in_use;
+} my_req_ctx_t;
+
+// application code: find the pooled context that owns these comm params
+static my_req_ctx_t *my_ctx_from_comm_params(void *p_comm_params);
+
+static void my_resp_handler(void *p_disp_ctx, uint8_t *p_untyped_resp,
+                            const fp_cmd_status_t cmd_status) {
+    // use the result; the context is still in use
+}
+
+static void my_released(void *p_comm_params) {
+    // map the transport's comm params back to the application context
+    my_req_ctx_t *p_ctx = my_ctx_from_comm_params(p_comm_params);
+    p_ctx->in_use = false; // the transport has closed the connection
+}
+
+p_ctx->in_use = true;
+(void)memset(&p_ctx->disp_ctx, 0, sizeof(p_ctx->disp_ctx));
+fp_config_user_assign_sys_context(&p_ctx->disp_ctx, FP_CONFIG_SYS_CTX_TYPE_CSP);
+p_ctx->disp_ctx.p_comm_params = &p_ctx->comm_params; // one per request, identifies p_ctx
+p_ctx->disp_ctx.p_on_released = &my_released;
+
+if (FP_CMD_STATUS_NOERROR != fp_disp_client_send_req(&p_ctx->disp_ctx, 0x1234, 0x5678,
+                                                     FP_FRAME_TYPE_REQ, request_buffer,
+                                                     sizeof(request_buffer), NULL,
+                                                     &my_resp_handler, 5000)) {
+    p_ctx->in_use = false; // not accepted: the release handler will not run
+}
+```
+
+#### Transport Session Callbacks
+
+A transport registers its session callbacks with
+`fp_disp_session_mgr_register_callbacks`. `p_open`, `p_track` and `p_close` run under
+the session lock, so they must not call application code or `fp_disp_execute`.
+`p_deliver` (optional) runs without any FP lock.
+
+A transport that polls for asynchronous responses in `p_track` splits the work:
+
+```c
+static fp_session_track_action_t my_track(fp_disp_session_base_t *const p_sess) {
+    my_csp_params_t *p_params = (my_csp_params_t *)p_sess->p_comm_params;
+    p_params->p_pending = my_poll(p_params);   // under the lock: read, do not dispatch
+    return (NULL != p_params->p_pending) ? FP_DISP_TRACK_ACTION_DELIVER
+                                         : FP_DISP_TRACK_ACTION_KEEP_SESSION_ACTIVE;
+}
+
+static fp_session_track_action_t my_deliver(fp_disp_session_base_t *const p_sess) {
+    // no FP lock held: the response handler runs from here
+    bool delivered = my_dispatch_pending(p_sess);   // calls fp_disp_execute
+    return delivered ? FP_DISP_TRACK_ACTION_CLOSE_SESSION
+                     : FP_DISP_TRACK_ACTION_KEEP_SESSION_ACTIVE;
+}
+```
+
+`FP_DISP_TRACK_ACTION_DELIVER` is valid for client sessions only, and only with a
+`p_deliver` callback registered. When `p_deliver` returns
+`FP_DISP_TRACK_ACTION_KEEP_SESSION_ACTIVE`, the session is tracked again and its
+timeout still applies. Free a pending response in `p_close` if it was never
+delivered.
+
 **Server Side (Handling Requests):**
 ```c
 #include "fp_disp_server.h"
@@ -1121,6 +1249,8 @@ printf("iface_id: 0x%04X, func_id: 0x%08X, cmd_id: 0x%04X, status: 0x%02X\n",
 
 #### Client API
 ```c
+// For an asynchronous request, p_disp_ctx->p_on_released (optional) is called once
+// after the session is closed; see "Asynchronous Requests"
 fp_cmd_status_t fp_disp_client_send_req(
     fp_dispatch_info_t *p_disp_ctx,
     const uint16_t iface_id,

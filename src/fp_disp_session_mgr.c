@@ -115,6 +115,31 @@ static void base_init_session(fp_disp_session_base_t *const p_session);
 static void track_session(fp_dispatch_sys_context_t *const p_sys_ctx,
                           fp_disp_session_base_t *const    p_sess);
 
+/** @brief Mark a client session for the second tracking phase (called under the client-session lock)
+ *
+ *  @param[in] p_sess pointer to the client session
+ *  @param[in] action what the tracker does with the session once the lock is released
+ */
+static void defer_session(fp_disp_session_base_t *const     p_sess,
+                          const fp_session_deferred_action_t action);
+
+/** @brief Carry out the deferred action of one client session (called without any fp lock held)
+ *
+ *  @param[in] p_sys_ctx pointer to a valid FP system context
+ *  @param[in] p_sess pointer to a client session in state @ref FP_SESSION_STATE_DEFERRED
+ */
+static void run_deferred_session(fp_dispatch_sys_context_t *const p_sys_ctx,
+                                 fp_disp_session_base_t *const    p_sess);
+
+/** @brief Carry out the deferred actions of all client sessions in state @ref FP_SESSION_STATE_DEFERRED
+ *         (phase 2 of the session tracking, called without any fp lock held)
+ *
+ *  @param[in] p_sys_ctx pointer to a valid FP system context
+ *  @param[in] p_sess_data pointer to the client session pool data
+ */
+static void run_deferred_sessions(fp_dispatch_sys_context_t *const    p_sys_ctx,
+                                  const fp_disp_session_data_t *const p_sess_data);
+
 /*
 ***************************************************************************************************
 * INTERNAL (STATIC) VARIABLES DEFINITION/DECLARATION
@@ -286,7 +311,12 @@ fp_disp_session_base_t *fp_disp_session_mgr_find_session(fp_dispatch_sys_context
 
         fp_arch_assert((NULL != p_sess_attr) && (NULL != p_sess_attr->p_is_matching));
 
-        if ((FP_SESSION_STATE_INACTIVE != atomic_load(&p_sess_iter->state)) &&
+        const fp_session_state_t state = atomic_load(&p_sess_iter->state);
+
+        // a deferred session still takes the response it is being delivered; any other deferred session
+        // is about to be closed (e.g. timed out) and must not take a late response
+        if ((FP_SESSION_STATE_INACTIVE != state) &&
+            ((FP_SESSION_STATE_DEFERRED != state) || (FP_SESSION_DEFERRED_DELIVER == p_sess_iter->deferred_action)) &&
             (NULL != p_sess_attr) &&
             (NULL != p_sess_attr->p_is_matching) &&
             ((*p_sess_attr->p_is_matching)(p_sess_iter, p_msg_hdr)))
@@ -333,10 +363,24 @@ void fp_disp_session_mgr_close_session(fp_dispatch_sys_context_t *const p_sys_ct
         return;
     }
 
+    // holding the lock while the tracker's locked scan is in progress means this thread is the tracker:
+    // a close from its locked phase would run the release handler under the lock
+    fp_arch_break_assert(!((FP_DISP_SESSION_TYPE_CLIENT == p_sess_attrib->sess_type) && p_sys_ctx->client_track_locked));
+
     // Call the user-provided close session handler if it exists
     if (NULL != p_sys_ctx->session_callbacks.p_close)
     {
         (*p_sys_ctx->session_callbacks.p_close)(p_session);
+    }
+
+    // the transport has released the session: take the release handler and the parameters it reports
+    // while p_comm_params is still assigned (base_init_session clears it)
+    fp_session_released_handler_t p_released_handler = NULL;
+    void *const                   p_comm_params      = p_session->p_comm_params;
+
+    if (NULL != p_sess_attrib->p_release_func)
+    {
+        p_released_handler = (*p_sess_attrib->p_release_func)(p_session);
     }
 
     base_init_session(p_session);
@@ -347,6 +391,12 @@ void fp_disp_session_mgr_close_session(fp_dispatch_sys_context_t *const p_sys_ct
     safe_dec(&sess_data.p_metrics->active_session_cnt);
 
     fp_arch_unlock_section(p_section_lock);
+
+    // application code runs without the lock (see fp_session_released_handler_t)
+    if (NULL != p_released_handler)
+    {
+        (*p_released_handler)(p_comm_params);
+    }
 }
 
 void fp_disp_session_mgr_track_sessions(fp_dispatch_sys_context_t *const p_sys_ctx)
@@ -366,9 +416,14 @@ void fp_disp_session_mgr_track_sessions(fp_dispatch_sys_context_t *const p_sys_c
         fp_disp_session_mgr_get_session_data(p_sys_ctx, (fp_disp_session_type_t)sess_type_id, &sess_data);
 
         void *p_section_lock = p_sys_ctx->p_section_locks[sess_data.section_lock_id];
+        bool  is_client      = (FP_DISP_SESSION_TYPE_CLIENT == (fp_disp_session_type_t)sess_type_id);
 
+        // phase 1, under the lock: decide what happens to each session; client sessions that need
+        // application code are only marked (DEFERRED)
         if (fp_arch_lock_section(p_section_lock))
         {
+            p_sys_ctx->client_track_locked = is_client;
+
             for (uint16_t sess_idx = 0; sess_idx < sess_data.max_session_cnt; sess_idx++)
             {
                 fp_disp_session_base_t *const p_sess = fp_disp_session_mgr_get_base_ptr((uint8_t *)sess_data.p_session_pool, (fp_disp_session_type_t)sess_type_id, sess_idx);
@@ -376,12 +431,20 @@ void fp_disp_session_mgr_track_sessions(fp_dispatch_sys_context_t *const p_sys_c
                 track_session(p_sys_ctx, p_sess);
             }
 
+            p_sys_ctx->client_track_locked = false;
+
             fp_arch_unlock_section(p_section_lock);
         }
         else
         {
             FP_ARCH_TRACE_ERROR("Lock acquire failed: type=session_mgr, handle=%p, context=session_track, sess_type=%u",
                                 p_section_lock, sess_type_id);
+        }
+
+        // phase 2, without the lock: carry out the deferred actions
+        if (is_client)
+        {
+            run_deferred_sessions(p_sys_ctx, &sess_data);
         }
     }
 }
@@ -480,8 +543,9 @@ static void base_init_session(fp_disp_session_base_t *const p_session)
     p_session->req_fp_hdr.func_id  = UINT32_MAX;
     p_session->req_fp_hdr.status   = FP_CMD_STATUS_MAX;
     atomic_store(&p_session->state, FP_SESSION_STATE_INACTIVE);
-    p_session->timeout       = 0;
-    p_session->p_comm_params = NULL;
+    p_session->timeout         = 0;
+    p_session->p_comm_params   = NULL;
+    p_session->deferred_action = (uint8_t)FP_SESSION_DEFERRED_NONE;
     fp_arch_stop_timer(&p_session->timer_hnd);
 }
 
@@ -501,10 +565,36 @@ static void track_session(fp_dispatch_sys_context_t *const p_sys_ctx,
             track_action = (*p_sys_ctx->session_callbacks.p_track)(p_sess);
         }
 
-        if (FP_DISP_TRACK_ACTION_CLOSE_SESSION == track_action)
+        const bool is_client = (FP_DISP_SESSION_TYPE_CLIENT == ((const fp_disp_session_attributes_t *)(p_sess->p_session_attr))->sess_type);
+
+        if ((FP_DISP_TRACK_ACTION_DELIVER == track_action) &&
+            ((false == is_client) || (NULL == p_sys_ctx->session_callbacks.p_deliver)))
         {
-            // user tracking confirmed that the session can be closed
-            fp_disp_session_mgr_close_session(p_sys_ctx, p_sess);
+            // nothing could deliver the response: keep tracking, the session times out as usual
+            FP_ARCH_TRACE_ERROR("Track action DELIVER needs a client session and a p_deliver callback: session_id=%p",
+                                p_sess);
+            fp_arch_break_assert(false);
+
+            track_action = FP_DISP_TRACK_ACTION_KEEP_SESSION_ACTIVE;
+        }
+
+        if (FP_DISP_TRACK_ACTION_DELIVER == track_action)
+        {
+            // the response is dispatched after the lock is released (p_deliver)
+            defer_session(p_sess, FP_SESSION_DEFERRED_DELIVER);
+        }
+        else if (FP_DISP_TRACK_ACTION_CLOSE_SESSION == track_action)
+        {
+            // user tracking confirmed that the session can be closed; a client session is closed after the
+            // lock is released, so that its release handler does not run under the lock
+            if (is_client)
+            {
+                defer_session(p_sess, FP_SESSION_DEFERRED_CLOSE);
+            }
+            else
+            {
+                fp_disp_session_mgr_close_session(p_sys_ctx, p_sess);
+            }
         }
         else
         {
@@ -519,4 +609,95 @@ static void track_session(fp_dispatch_sys_context_t *const p_sys_ctx,
             }
         }
     }
+}
+
+static void defer_session(fp_disp_session_base_t *const     p_sess,
+                          const fp_session_deferred_action_t action)
+{
+    fp_arch_assert(NULL != p_sess);
+    fp_arch_assert((FP_SESSION_DEFERRED_NONE < action) && (FP_SESSION_DEFERRED_MAX > action));
+
+    p_sess->deferred_action = (uint8_t)action;
+    atomic_store(&p_sess->state, FP_SESSION_STATE_DEFERRED);
+}
+
+static void run_deferred_sessions(fp_dispatch_sys_context_t *const    p_sys_ctx,
+                                  const fp_disp_session_data_t *const p_sess_data)
+{
+    // Only fp_disp_session_mgr_track_sessions sets or clears the DEFERRED state, and sessions are only
+    // allocated from INACTIVE, so reading the pool here is safe. A session left DEFERRED by an earlier
+    // pass (its close could not take the lock) is retried.
+    for (uint16_t sess_idx = 0; sess_idx < p_sess_data->max_session_cnt; sess_idx++)
+    {
+        fp_disp_session_base_t *const p_sess = fp_disp_session_mgr_get_base_ptr((uint8_t *)p_sess_data->p_session_pool, FP_DISP_SESSION_TYPE_CLIENT, sess_idx);
+
+        if (FP_SESSION_STATE_DEFERRED == atomic_load(&p_sess->state))
+        {
+            run_deferred_session(p_sys_ctx, p_sess);
+        }
+    }
+}
+
+static void run_deferred_session(fp_dispatch_sys_context_t *const p_sys_ctx,
+                                 fp_disp_session_base_t *const    p_sess)
+{
+    fp_arch_assert((NULL != p_sys_ctx) && (NULL != p_sess));
+
+    const fp_disp_session_attributes_t *p_sess_attrib = (const fp_disp_session_attributes_t *)p_sess->p_session_attr;
+
+    switch ((fp_session_deferred_action_t)p_sess->deferred_action)
+    {
+        case FP_SESSION_DEFERRED_DELIVER:
+        {
+            fp_session_track_action_t deliver_action = FP_DISP_TRACK_ACTION_KEEP_SESSION_ACTIVE;
+
+            if (NULL != p_sys_ctx->session_callbacks.p_deliver)
+            {
+                deliver_action = (*p_sys_ctx->session_callbacks.p_deliver)(p_sess);
+            }
+
+            if (FP_DISP_TRACK_ACTION_CLOSE_SESSION != deliver_action)
+            {
+                // not delivered (e.g. the frame did not match): keep tracking; the timeout still applies
+                p_sess->deferred_action = (uint8_t)FP_SESSION_DEFERRED_NONE;
+                atomic_store(&p_sess->state, FP_SESSION_STATE_ACTIVE);
+
+                return;
+            }
+
+            break;
+        }
+
+        case FP_SESSION_DEFERRED_TIMEOUT:
+        {
+            if (NULL != p_sess_attrib->p_timeout_func)
+            {
+                (*p_sess_attrib->p_timeout_func)(p_sess);
+            }
+
+            break;
+        }
+
+        case FP_SESSION_DEFERRED_CLOSE:
+        {
+            break;
+        }
+
+        default:
+        {
+            FP_ARCH_TRACE_ERROR("Invalid deferred action: session_id=%p, action=%u", p_sess, p_sess->deferred_action);
+            fp_arch_break_assert(false);
+
+            break;
+        }
+    }
+
+    // the application has been told; whatever happens below, nothing above runs again for this session
+    p_sess->deferred_action = (uint8_t)FP_SESSION_DEFERRED_CLOSE;
+
+    FP_ARCH_TRACE_DEBUG("Session close (deferred): session_id=%p, request='%u:%lu:%u'",
+                        p_sess, p_sess->req_fp_hdr.iface_id, p_sess->req_fp_hdr.func_id, p_sess->req_fp_hdr.cmd_id);
+
+    // a close that cannot take the lock leaves the session DEFERRED/CLOSE: the next pass retries it
+    fp_disp_session_mgr_close_session(p_sys_ctx, p_sess);
 }

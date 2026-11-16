@@ -93,6 +93,8 @@ const fp_disp_session_attributes_t fp_disp_server_sess_attrib = {
     .p_init_func = &fp_disp_server_session_init,
     .p_is_matching = &fp_disp_server_session_is_matching,
     .p_track_session = &fp_disp_server_session_track,
+    .p_release_func = NULL,
+    .p_timeout_func = NULL,
     .sess_type = FP_DISP_SESSION_TYPE_SERVER
     // clang-format on
 };

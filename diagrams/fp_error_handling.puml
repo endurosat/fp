@@ -47,9 +47,10 @@ activate Dispatcher
 Dispatcher -> Transport: [Send successful]
 note over Dispatcher: Start timeout tracking
 ... 5000ms elapsed ...
-note over SessionMgr: Timer expires
-SessionMgr -> SessionMgr: [Auto-close session]
-Dispatcher -> Client: FP_CMD_STATUS_TIMEOUT
+note over SessionMgr: Timer expires\n(marked under the lock, handled after unlock)
+SessionMgr -> Client: response handler(FP_CMD_STATUS_TIMEOUT)
+SessionMgr -> SessionMgr: [Close session: p_close under the lock]
+SessionMgr -> Client: release handler(p_comm_params), if set
 deactivate Dispatcher
 
 == Scenario 5: Unsupported Function ==

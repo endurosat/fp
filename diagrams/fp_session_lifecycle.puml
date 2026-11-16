@@ -34,8 +34,8 @@ RequestSent --> Available : [Session allocation failed]
 RequestSent --> WaitingResp : [Session allocated]
 WaitingResp --> RespReceived : [Response arrives]
 WaitingResp --> ClientTimeout : [Timeout elapsed]
-RespReceived --> ClientIdle : [Session closed]
-ClientTimeout --> ClientIdle : [Session closed]
+RespReceived --> ClientIdle : [Session closed: p_close, then release handler if async]
+ClientTimeout --> ClientIdle : [Session closed: p_close, then release handler if async]
 
 ' Server session transitions
 ServerIdle --> ARMReceived : [ARM request arrives]
@@ -62,6 +62,9 @@ note right of ClientLifecycle
   - Sync/async support
   - Event signaling
   - Response buffering
+  - Release handler (async requests, optional)
+  - App callbacks run outside the session lock
+    (two-phase tracking, p_deliver)
 end note
 
 note right of ServerLifecycle
