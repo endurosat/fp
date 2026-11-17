@@ -32,7 +32,10 @@ extern "C" {
 */
 
 /* Define export macros for shared library builds */
-#if defined(_WIN32) || defined(_WIN64)
+#if defined(FP_STATIC)
+/* Static build */
+#define FP_API
+#elif defined(_WIN32) || defined(_WIN64)
 /* Windows platform */
 #ifdef FP_EXPORTS
 /* Building the DLL */

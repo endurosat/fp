@@ -3611,8 +3611,7 @@ TEST_CASE("Test FP session management routines", "[session management]")
             fp_disp_session_mgr_track_sessions(&test_sys_ctx);
 
             // is_timer_elapsed() must not be called in case of SYNC requests (timeouts directly handled by blocking function)
-            REQUIRE_FALSE(test_timeout == env::fp_arch_is_timer_elapsed.params.back().elapse_time);
-            REQUIRE_FALSE(&client_sess.base.timer_hnd == env::fp_arch_is_timer_elapsed.params.back().p_timer_hnd);
+            REQUIRE(env::fp_arch_is_timer_elapsed.params.empty());
             // check that session is still active
             REQUIRE(FP_SESSION_STATE_ACTIVE == atomic_load(&client_sess.base.state));
 

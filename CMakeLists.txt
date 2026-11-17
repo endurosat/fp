@@ -8,14 +8,12 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED True)
 
 # Determine library type based on platform
-if(CMAKE_SYSTEM_NAME STREQUAL "Windows" OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    set(FP_LIBRARY_TYPE SHARED)
-    # Add symbol export definitions for Windows
-    if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-        add_definitions(-DFP_EXPORTS)
+if(NOT DEFINED FP_LIBRARY_TYPE)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Windows" OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        set(FP_LIBRARY_TYPE SHARED)
+    else()
+        set(FP_LIBRARY_TYPE STATIC)
     endif()
-else()
-    set(FP_LIBRARY_TYPE STATIC)
 endif()
 
 list(APPEND SOURCES
@@ -32,6 +30,12 @@ add_library(${PROJECT_NAME} ${FP_LIBRARY_TYPE} ${SOURCES})
 add_library("fp" ALIAS ${PROJECT_NAME})
 
 target_include_directories(${PROJECT_NAME} PUBLIC ${PROJECT_SOURCE_DIR}/inc)
+
+if(FP_LIBRARY_TYPE STREQUAL "STATIC")
+    target_compile_definitions(${PROJECT_NAME} PUBLIC FP_STATIC)
+elseif(WIN32)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE FP_EXPORTS)
+endif()
 
 if(TARGET svc_fp_cfg)
     target_link_libraries(${PROJECT_NAME} PUBLIC svc_fp_cfg)

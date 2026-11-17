@@ -14,6 +14,9 @@ message(STATUS "Unit test sources to build: '${UNIT_TEST_PRJ_FILES_LIST}'")
 
 # Set before Catch2 is configured: a fetched Catch2 names its libraries by build type.
 set(CMAKE_BUILD_TYPE Debug)
+if(NOT DEFINED FP_LIBRARY_TYPE)
+    set(FP_LIBRARY_TYPE STATIC CACHE STRING "Library type for unit tests")
+endif()
 
 Include(FetchContent)
 
@@ -65,30 +68,30 @@ set(COV_REPORT_DIR "${CMAKE_BINARY_DIR}/cov-report")
 
 find_program(GCOVR_EXECUTABLE NAMES gcovr)
 if (NOT GCOVR_EXECUTABLE)
-    message(FATAL_ERROR "gcovr not found")
+    message(WARNING "gcovr not found; 'gen-test-coverage' target will be disabled")
 else()
     message(STATUS "gcovr found: ${GCOVR_EXECUTABLE}")
+
+    add_custom_target(gen-test-coverage
+        # print the text coverage report for the CI to capture the coverage information in the output
+        COMMAND ${CMAKE_COMMAND} -E echo "Printing coverage information"
+        COMMAND ${GCOVR_EXECUTABLE} --filter "${TEST_CMP_ABS_PATH}/src/*"
+        # make sure the coverage report folder exists because gcovr will fail if not
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${COV_REPORT_DIR}
+
+        COMMAND ${CMAKE_COMMAND} -E echo "Generating coverage report for use by SonarQube"
+        COMMAND ${GCOVR_EXECUTABLE} --filter "${TEST_CMP_ABS_PATH}/src/*" --sonarqube ${COV_REPORT_DIR}/sonar-cov.xml
+
+        COMMAND ${CMAKE_COMMAND} -E echo "Generating Cobertura XML report for GitLab integration"
+        COMMAND ${GCOVR_EXECUTABLE} --filter "${TEST_CMP_ABS_PATH}/src/*" --cobertura --cobertura-pretty -o ${COV_REPORT_DIR}/cov-report-cobertura.xml
+
+        COMMAND ${CMAKE_COMMAND} -E echo "Generating HTML detailed report"
+        COMMAND ${GCOVR_EXECUTABLE} --filter "${TEST_CMP_ABS_PATH}/src/*" --html-details --output ${COV_REPORT_DIR}/cov-report.html --root ${TEST_CMP_ABS_PATH}
+        BYPRODUCTS ${COV_REPORT_DIR} ${CMAKE_BINARY_DIR}/cov-report-cobertura.xml ${COV_REPORT_DIR}/coverage.info
+        COMMENT "Generating coverage report"
+        DEPENDS run-test
+        VERBATIM)
 endif()
-
-add_custom_target(gen-test-coverage
-    # print the text coverage report for the CI to capture the coverage information in the output
-    COMMAND ${CMAKE_COMMAND} -E echo "Printing coverage information"
-    COMMAND ${GCOVR_EXECUTABLE} --filter "${TEST_CMP_ABS_PATH}/src/*"
-    # make sure the coverage report folder exists because gcovr will fail if not
-    COMMAND mkdir -p ${COV_REPORT_DIR}
-
-    COMMAND ${CMAKE_COMMAND} -E echo "Generating coverage report for use by SonarQube"
-    COMMAND ${GCOVR_EXECUTABLE} --filter "${TEST_CMP_ABS_PATH}/src/*" --sonarqube ${COV_REPORT_DIR}/sonar-cov.xml
-
-    COMMAND ${CMAKE_COMMAND} -E echo "Generating Cobertura XML report for GitLab integration"
-    COMMAND ${GCOVR_EXECUTABLE} --filter "${TEST_CMP_ABS_PATH}/src/*" --cobertura --cobertura-pretty -o ${COV_REPORT_DIR}/cov-report-cobertura.xml
-
-    COMMAND ${CMAKE_COMMAND} -E echo "Generating HTML detailed report"
-    COMMAND ${GCOVR_EXECUTABLE} --filter "${TEST_CMP_ABS_PATH}/src/*" --html-details --output ${COV_REPORT_DIR}/cov-report.html --root ${TEST_CMP_ABS_PATH}
-    BYPRODUCTS ${COV_REPORT_DIR} ${CMAKE_BINARY_DIR}/cov-report-cobertura.xml ${COV_REPORT_DIR}/coverage.info
-    COMMENT "Generating coverage report"
-    DEPENDS run-test
-    VERBATIM)
 
 list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
 include(CTest)
