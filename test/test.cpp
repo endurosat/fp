@@ -994,8 +994,10 @@ TEST_CASE("Test basic FP command dispatching", "[dispatch]")
                     // If we're using a CLIENT interface, the function should be found
                     if (test_fidl_ifs[fidl_idx].gen_type == FIDL_TYPE_CLIENT)
                     {
-                        // Verify the function was found and executed
-                        REQUIRE(result);
+                        // The function is found and executed, but the dummy callback hands the frame to
+                        // no client session (generated code calls fp_disp_client_handle_resp), so the
+                        // response is not reported as dispatched
+                        REQUIRE_FALSE(result);
 
                         // Verify that the correct function callback was called
                         REQUIRE(internal_test_env.dummy_func_cbk_called);
@@ -1303,7 +1305,9 @@ TEST_CASE("Test correct FP command dispatching when a node is both a server and 
         msg_hdr.iface_id = fidl_id_common;                                          // must not exist in the test setup data above
         msg_hdr.func_id  = test_fidl_ifs[0].p_func_list[0].func_id | RESP_BIT_MASK; // ensure this is a response frame so the dispatcher must land on the client gen context
 
-        REQUIRE(fp_disp_execute(&test_dispatch_info));
+        // the client callback runs, but it hands the response to no client session, so the response
+        // is not reported as dispatched
+        REQUIRE_FALSE(fp_disp_execute(&test_dispatch_info));
 
         // if the FIDL function handler is dispatched successfully, then the expectation is only that
         // the user-specified callback gets executed (it is up to the user implementation to send a response; our test stubs do not send it so we just ensure that
@@ -6822,5 +6826,152 @@ TEST_CASE("Test async client request release handler", "[dispatch][client][relea
         fp_disp_session_mgr_track_sessions(&test_sys_ctx);
 
         REQUIRE(release_test::log.events == std::vector<event_t>{ event_t::resp, event_t::close });
+    }
+}
+
+// fp_disp_execute reports a response frame as dispatched only when a client session took it
+namespace resp_dispatch_test
+{
+static int resp_cnt = 0;
+
+static void resp_handler(void *p_disp_ctx, uint8_t *p_untyped_resp, const fp_cmd_status_t cmd_status)
+{
+    (void)p_disp_ctx;
+    (void)p_untyped_resp;
+    (void)cmd_status;
+    ++resp_cnt;
+}
+
+// stands for generated client code: hands the response to the waiting client session
+static void generated_client_cbk(fp_dispatch_info_t *p_disp_ctx)
+{
+    (void)fp_disp_client_handle_resp(p_disp_ctx, sizeof(fp_msg_hdr_t));
+}
+
+// a hand-written client callback that takes the response without fp_disp_client_handle_resp
+static int custom_cbk_cnt = 0;
+
+static void custom_client_cbk(fp_dispatch_info_t *p_disp_ctx)
+{
+    (void)p_disp_ctx;
+    ++custom_cbk_cnt;
+}
+} // namespace resp_dispatch_test
+
+TEST_CASE("Test response dispatch reports whether a client session took the frame", "[dispatch][client]")
+{
+    constexpr uint16_t generated_if_id = 0x31;
+    constexpr uint16_t custom_if_id    = 0x32;
+    constexpr uint32_t resp_func_id    = 7;
+
+    std::array<fidl_func_t, 1> generated_funcs = { { { .func_id = resp_func_id, .p_on_func_cbk = &resp_dispatch_test::generated_client_cbk } } };
+    std::array<fidl_func_t, 1> custom_funcs    = { { { .func_id = resp_func_id, .p_on_func_cbk = &resp_dispatch_test::custom_client_cbk } } };
+
+    fidl_if_t generated_if = { .version = test_fidl_version, .gen_type = FIDL_TYPE_CLIENT, .fidl_if_id = generated_if_id, .func_count = 1, .p_func_list = generated_funcs.data() };
+    fidl_if_t custom_if    = { .version = test_fidl_version, .gen_type = FIDL_TYPE_CLIENT, .fidl_if_id = custom_if_id, .func_count = 1, .p_func_list = custom_funcs.data() };
+
+    static fp_dispatch_sys_context_t test_sys_ctx;
+    memset(static_cast<void *>(&test_sys_ctx), 0, sizeof(test_sys_ctx));
+    test_sys_ctx.p_send = &test_sys_ctx_send_func;
+
+    env::clear();
+    env::fp_arch_lock_registry.retval    = true;
+    env::fp_arch_lock_section.retval     = true;
+    env::fp_arch_is_timer_elapsed.retval = false;
+
+    fp_registry_init();
+    REQUIRE(fp_registry_add_fidl_if(&generated_if));
+    REQUIRE(fp_registry_add_fidl_if(&custom_if));
+
+    internal_test_env.clear();
+    internal_test_env.dummy_send_cbk_ret_val = true;
+
+    resp_dispatch_test::resp_cnt       = 0;
+    resp_dispatch_test::custom_cbk_cnt = 0;
+
+    fp_disp_session_mgr_init(&test_sys_ctx);
+
+    int          app_ctx = 0;
+    fp_msg_hdr_t req_hdr = {};
+
+    fp_dispatch_info_t req_ctx = {};
+    req_ctx.p_sys_ctx          = &test_sys_ctx;
+    req_ctx.p_comm_params      = &app_ctx;
+
+    auto *const p_sess0 = &test_sys_ctx.client_session_pools[0];
+
+    // sends an async request on the given interface and returns a matching NOERROR response header
+    auto send_async = [&](const uint16_t if_id) {
+        REQUIRE(FP_CMD_STATUS_NOERROR == fp_disp_client_send_req(&req_ctx, if_id, resp_func_id, FP_FRAME_TYPE_REQ,
+                                                                 reinterpret_cast<uint8_t *>(&req_hdr), sizeof(req_hdr),
+                                                                 nullptr, &resp_dispatch_test::resp_handler, test_timeout));
+        fp_msg_hdr_t resp_hdr = p_sess0->base.req_fp_hdr;
+        resp_hdr.func_id |= RESP_BIT_MASK;
+        resp_hdr.status = FP_CMD_STATUS_NOERROR;
+        return resp_hdr;
+    };
+
+    fp_msg_hdr_t       resp_hdr = {};
+    fp_dispatch_info_t rx_ctx   = {};
+    rx_ctx.p_sys_ctx            = &test_sys_ctx;
+    rx_ctx.p_comm_params        = &app_ctx;
+    rx_ctx.p_data               = reinterpret_cast<uint8_t *>(&resp_hdr);
+    rx_ctx.data_size            = sizeof(resp_hdr);
+
+    SECTION("The expected response is dispatched and the session that took it is recorded")
+    {
+        resp_hdr = send_async(generated_if_id);
+
+        REQUIRE(fp_disp_execute(&rx_ctx));
+        REQUIRE(&p_sess0->base == rx_ctx.p_assigned_sess);
+        REQUIRE_FALSE(internal_test_env.p_sys_ctx_send_disp_ctx == &rx_ctx); // no error reply
+    }
+
+    SECTION("A stray response with an unknown cmd_id is not dispatched and the request stays open")
+    {
+        resp_hdr = send_async(generated_if_id);
+        resp_hdr.cmd_id++;
+
+        // a stale value from an earlier dispatch must not count
+        rx_ctx.p_assigned_sess = &p_sess0->base;
+
+        REQUIRE_FALSE(fp_disp_execute(&rx_ctx));
+        REQUIRE(nullptr == rx_ctx.p_assigned_sess);
+        REQUIRE_FALSE(internal_test_env.p_sys_ctx_send_disp_ctx == &rx_ctx); // a response gets no error reply
+        REQUIRE(FP_SESSION_STATE_ACTIVE == atomic_load(&p_sess0->base.state));
+        REQUIRE(0 == resp_dispatch_test::resp_cnt);
+
+        // the real response that follows is still dispatched
+        resp_hdr.cmd_id--;
+        REQUIRE(fp_disp_execute(&rx_ctx));
+        REQUIRE(&p_sess0->base == rx_ctx.p_assigned_sess);
+    }
+
+    SECTION("A matching session that cannot take the response does not count as dispatched")
+    {
+        resp_hdr = send_async(generated_if_id);
+
+        const auto saved_req_type = p_sess0->req_type;
+        p_sess0->req_type         = FP_REQ_TYPE_MAX;
+
+        REQUIRE_FALSE(fp_disp_execute(&rx_ctx));
+        REQUIRE(nullptr == rx_ctx.p_assigned_sess);
+
+        p_sess0->req_type = saved_req_type;
+    }
+
+    SECTION("A client callback that does not hand the response to a session: not dispatched, and not routed again")
+    {
+        resp_hdr = send_async(custom_if_id);
+
+        const uint32_t lock_cnt_before = env::fp_arch_lock_section.call_cnt;
+
+        REQUIRE_FALSE(fp_disp_execute(&rx_ctx));
+        REQUIRE(1 == resp_dispatch_test::custom_cbk_cnt);
+        REQUIRE(nullptr == rx_ctx.p_assigned_sess);
+
+        // no second session lookup by cmd_id (the lookup takes the section lock)
+        REQUIRE(lock_cnt_before == env::fp_arch_lock_section.call_cnt);
+        REQUIRE(FP_SESSION_STATE_ACTIVE == atomic_load(&p_sess0->base.state));
     }
 }

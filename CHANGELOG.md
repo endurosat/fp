@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A stray response frame whose `cmd_id` matches no request no longer counts as
+  dispatched: for a response frame, `fp_disp_execute` now returns `true` only when
+  a client session took it. A transport that closes an asynchronous request when
+  `fp_disp_execute` returns `true` (such as fp_csp_binder) used to close the
+  request on such a frame, drop the real reply and never call the response
+  handler. The request now stays open and the real reply is delivered. As before,
+  a registered client callback must hand the frame to `fp_disp_client_handle_resp`,
+  as generated client code does.
+- A frame whose registered callback ran is no longer passed on to the
+  unmatched-frame route, so a response is never looked up a second time by
+  `cmd_id`.
+
 ## [1.5.0] - 2026-11-16
 
 ### Added

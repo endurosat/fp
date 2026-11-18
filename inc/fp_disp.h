@@ -73,8 +73,20 @@ typedef struct
  * the requested command is not found
  *
  * @param[in] p_disp_ctx FP frame dispatch context
- * @retval true the FP frame was dispatched successfully
- * @retval false the FP frame dispatch failed
+ * @retval true the FP frame was dispatched successfully; for a response frame, a waiting client
+ *              session took it (its response handler ran, or its synchronous caller was woken)
+ * @retval false the FP frame dispatch failed; for a response frame, no client session took it
+ *               (e.g. a stray frame whose cmd_id matches no request), so the transport should
+ *               keep the request open
+ *
+ * @note For a response frame, the registered client callback must hand the frame to
+ * fp_disp_client_handle_resp (as generated client code does): that call records the session
+ * that took it in @ref fp_dispatch_info_t::p_assigned_sess, which this function checks. A client
+ * callback that handles the frame without that call makes this function return false.
+ *
+ * @note A frame whose registered callback ran is not routed further: only a frame that matched no
+ * registered function goes to the unmatched route (an error reply for a request, a lookup by
+ * cmd_id for a response).
  *
  * @note Automatic responses will be returned only for invalid requests. Invalid requests will silently
  * be ignored by this function.

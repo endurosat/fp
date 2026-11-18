@@ -343,6 +343,9 @@ static bool fp_disp_client_handle_resp_impl(fp_dispatch_info_t *p_disp_ctx,
         FP_ARCH_TRACE_WARN("Protocol validation failed: invalid_req_type=%u for response frame='%u:%lu:%u'",
                            p_client_session->req_type, p_fp_hdr->iface_id, p_fp_hdr->func_id, p_fp_hdr->cmd_id);
 
+        // not delivered: fp_disp_execute must not report the response as dispatched
+        p_disp_ctx->p_assigned_sess = NULL;
+
         return false;
     }
 
@@ -357,6 +360,9 @@ static bool fp_disp_client_handle_resp_impl(fp_dispatch_info_t *p_disp_ctx,
         {
             FP_ARCH_TRACE_WARN("Unvalidated RESP frame not delivered to async session: frame='%u:%lu:%u'",
                                p_fp_hdr->iface_id, p_fp_hdr->func_id, p_fp_hdr->cmd_id);
+
+            // not delivered: fp_disp_execute must not report the response as dispatched
+            p_disp_ctx->p_assigned_sess = NULL;
 
             return false;
         }

@@ -69,6 +69,7 @@ static bool fp_disp_route_unmatched(fp_dispatch_info_t         *p_disp_ctx,
 bool fp_disp_execute(fp_dispatch_info_t *p_disp_ctx)
 {
     bool fidl_func_found = false;
+    bool fidl_func_called = false;
 
     fp_arch_break_assert(NULL != p_disp_ctx);
 
@@ -86,6 +87,9 @@ bool fp_disp_execute(fp_dispatch_info_t *p_disp_ctx)
 
         // initialize this pointer is initialized correctly in case the dispatch fails
         p_disp_ctx->p_ext_buf_ref = NULL;
+
+        // the client response handler sets this only when a client session takes the response
+        p_disp_ctx->p_assigned_sess = NULL;
 
         FP_ARCH_TRACE_DEBUG("Dispatch execute entry: iface_id=%u, func_id=%lu",
                             p_fp_hdr->iface_id, p_fp_hdr->func_id);
@@ -106,12 +110,18 @@ bool fp_disp_execute(fp_dispatch_info_t *p_disp_ctx)
                 p_fp_hdr->status = FP_CMD_STATUS_NOERROR;
 
                 (*p_func->p_on_func_cbk)(p_disp_ctx);
+                fidl_func_called = true;
 
-                fidl_func_found = true;
+                // a response counts as dispatched only if a client session took it; otherwise
+                // (e.g. a stray frame with an unknown cmd_id) the transport keeps waiting
+                fidl_func_found = (FP_FRAME_TYPE_RESP != fp_attr.frame_type) ||
+                                  (NULL != p_disp_ctx->p_assigned_sess);
             }
         }
 
-        if (!fidl_func_found)
+        // a frame whose registered callback ran is not routed again: a second session lookup could
+        // hand a response the callback already took to the same session once more
+        if (!fidl_func_called)
         {
             fidl_func_found = fp_disp_route_unmatched(p_disp_ctx, &fp_attr);
         }
