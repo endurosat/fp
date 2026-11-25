@@ -107,7 +107,14 @@ bool fp_disp_execute(fp_dispatch_info_t *p_disp_ctx)
 
             if ((NULL != p_func) && (NULL != p_func->p_on_func_cbk))
             {
-                p_fp_hdr->status = FP_CMD_STATUS_NOERROR;
+                // A response carries the server's result in its status, so the client handler must
+                // see it as received. A request carries no result, and a server broadcast has no
+                // request that could fail (the sender always sets NOERROR), so both get a defined
+                // NOERROR before their callback runs, whatever the frame carried.
+                if (FP_FRAME_TYPE_RESP != fp_attr.frame_type)
+                {
+                    p_fp_hdr->status = FP_CMD_STATUS_NOERROR;
+                }
 
                 (*p_func->p_on_func_cbk)(p_disp_ctx);
                 fidl_func_called = true;

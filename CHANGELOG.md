@@ -28,6 +28,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs right after the response instead of at the timeout. Transports that close the
   session from `p_track` or `p_deliver`, such as fp_csp_binder, are not affected.
 
+- A client now gets the status the server sent in its response. `fp_disp_execute`
+  used to set the status of every frame to `FP_CMD_STATUS_NOERROR` before the
+  registered callback ran, so error replies of full size (such as
+  `FP_CMD_STATUS_FUNC_NOT_SUPPORTED` with a payload) reached the client as a
+  success, and the payload was used as a valid result. Only request and broadcast
+  frames are reset now. Asynchronous response handlers now receive the error
+  status together with a non-NULL `p_data`: check the status before you use the
+  data. Synchronous requests return the error status and get a zeroed response
+  buffer. `FP_CMD_STATUS_ARMED` and `FP_CMD_STATUS_DISARMED` replies reach the
+  client unchanged.
+
 ## [1.5.1] - 2026-11-20
 
 ### Fixed

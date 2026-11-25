@@ -1304,6 +1304,7 @@ TEST_CASE("Test correct FP command dispatching when a node is both a server and 
     {
         msg_hdr.iface_id = fidl_id_common;                                          // must not exist in the test setup data above
         msg_hdr.func_id  = test_fidl_ifs[0].p_func_list[0].func_id | RESP_BIT_MASK; // ensure this is a response frame so the dispatcher must land on the client gen context
+        msg_hdr.status   = FP_CMD_STATUS_FUNC_NOT_SUPPORTED;                        // the server's result, which the dispatcher must not overwrite
 
         // the client callback runs, but it hands the response to no client session, so the response
         // is not reported as dispatched
@@ -1319,7 +1320,7 @@ TEST_CASE("Test correct FP command dispatching when a node is both a server and 
         REQUIRE(internal_test_env.p_dummy_fidl_func_disp_ctx_user == &test_dispatch_info);
 
         auto p_resp_msg_hdr = reinterpret_cast<const fp_msg_hdr_t *>(internal_test_env.p_dummy_fidl_func_disp_ctx_user->p_data);
-        REQUIRE(p_resp_msg_hdr->status == FP_CMD_STATUS_NOERROR);
+        REQUIRE(p_resp_msg_hdr->status == FP_CMD_STATUS_FUNC_NOT_SUPPORTED); // a response keeps its wire status
         REQUIRE((p_resp_msg_hdr->func_id & ~RESP_BIT_MASK) == (msg_hdr.func_id & ~RESP_BIT_MASK)); // check if the function ID is the one we requested for dispatch
     }
 }
@@ -7145,5 +7146,267 @@ TEST_CASE("Test response dispatch reports whether a client session took the fram
         // no second session lookup by cmd_id (the lookup takes the section lock)
         REQUIRE(lock_cnt_before == env::fp_arch_lock_section.call_cnt);
         REQUIRE(FP_SESSION_STATE_ACTIVE == atomic_load(&p_sess0->base.state));
+    }
+}
+
+namespace resp_status_test
+{
+// typed response of the test FIDL function: the FP header and a 4-byte payload
+constexpr uint32_t resp_size = sizeof(fp_msg_hdr_t) + 4U;
+
+static int             resp_cnt     = 0;
+static fp_cmd_status_t resp_status  = FP_CMD_STATUS_MAX;
+static uint8_t        *p_resp_data  = nullptr;
+static fp_cmd_status_t srv_status   = FP_CMD_STATUS_MAX;
+static fp_cmd_status_t bcast_status = FP_CMD_STATUS_MAX;
+
+static void resp_handler(void *p_disp_ctx, uint8_t *p_untyped_resp, const fp_cmd_status_t cmd_status)
+{
+    (void)p_disp_ctx;
+    p_resp_data = p_untyped_resp;
+    resp_status = cmd_status;
+    ++resp_cnt;
+}
+
+// stands for generated client code: hands a full-size typed response to the waiting client session
+static void generated_client_cbk(fp_dispatch_info_t *p_disp_ctx)
+{
+    (void)fp_disp_client_handle_resp(p_disp_ctx, resp_size);
+}
+
+// server and broadcast callbacks record the status the dispatcher hands them
+static void server_cbk(fp_dispatch_info_t *p_disp_ctx)
+{
+    srv_status = static_cast<fp_cmd_status_t>(reinterpret_cast<const fp_msg_hdr_t *>(p_disp_ctx->p_data)->status);
+}
+
+static void broadcast_cbk(fp_dispatch_info_t *p_disp_ctx)
+{
+    bcast_status = static_cast<fp_cmd_status_t>(reinterpret_cast<const fp_msg_hdr_t *>(p_disp_ctx->p_data)->status);
+}
+
+// the response the sync wait stub delivers while the requester blocks
+static fp_dispatch_sys_context_t     *p_sys_ctx     = nullptr;
+static fp_cmd_status_t                wire_status   = FP_CMD_STATUS_NOERROR;
+static std::array<uint8_t, resp_size> rx_buf        = {};
+static bool                           rx_dispatched = false;
+
+static _Bool deliver_resp_during_wait(void *p_event, const uint32_t timeout_ms)
+{
+    (void)p_event;
+    (void)timeout_ms;
+
+    // answer the request that is blocked waiting: the open sync client session
+    const fp_disp_client_session_t *p_sync_sess = nullptr;
+    for (const auto &sess : p_sys_ctx->client_session_pools)
+    {
+        if ((FP_SESSION_STATE_INACTIVE != atomic_load(&sess.base.state)) && (FP_REQ_TYPE_SYNC == sess.req_type))
+        {
+            p_sync_sess = &sess;
+        }
+    }
+    REQUIRE(nullptr != p_sync_sess);
+
+    fp_msg_hdr_t hdr = p_sync_sess->base.req_fp_hdr;
+    hdr.func_id |= RESP_BIT_MASK;
+    hdr.status = wire_status;
+
+    rx_buf.fill(0x5A);
+    (void)memcpy(rx_buf.data(), &hdr, sizeof(hdr));
+
+    fp_dispatch_info_t rx_ctx = {};
+    rx_ctx.p_sys_ctx          = p_sys_ctx;
+    rx_ctx.p_data             = rx_buf.data();
+    rx_ctx.data_size          = resp_size;
+
+    rx_dispatched = fp_disp_execute(&rx_ctx);
+
+    return true;
+}
+} // namespace resp_status_test
+
+TEST_CASE("Test response frames keep the status the server sent", "[dispatch][client]")
+{
+    using namespace resp_status_test;
+
+    constexpr uint16_t client_if_id = 0x41;
+    constexpr uint16_t server_if_id = 0x42;
+    constexpr uint32_t test_fn_id   = 9;
+
+    std::array<fidl_func_t, 1> client_funcs = { { { .func_id = test_fn_id, .p_on_func_cbk = &generated_client_cbk } } };
+    std::array<fidl_func_t, 1> bcast_funcs  = { { { .func_id = test_fn_id + 1U, .p_on_func_cbk = &broadcast_cbk } } };
+    std::array<fidl_func_t, 1> server_funcs = { { { .func_id = test_fn_id, .p_on_func_cbk = &server_cbk } } };
+
+    fidl_if_t client_if = { .version = test_fidl_version, .gen_type = FIDL_TYPE_CLIENT, .fidl_if_id = client_if_id, .func_count = 1, .p_func_list = client_funcs.data() };
+    fidl_if_t bcast_if  = { .version = test_fidl_version, .gen_type = FIDL_TYPE_CLIENT, .fidl_if_id = server_if_id, .func_count = 1, .p_func_list = bcast_funcs.data() };
+    fidl_if_t server_if = { .version = test_fidl_version, .gen_type = FIDL_TYPE_SERVER, .fidl_if_id = server_if_id, .func_count = 1, .p_func_list = server_funcs.data() };
+
+    static fp_dispatch_sys_context_t test_sys_ctx;
+    memset(static_cast<void *>(&test_sys_ctx), 0, sizeof(test_sys_ctx));
+    test_sys_ctx.p_send = &test_sys_ctx_send_func;
+
+    env::clear();
+    env::fp_arch_lock_registry.retval    = true;
+    env::fp_arch_lock_section.retval     = true;
+    env::fp_arch_is_timer_elapsed.retval = false;
+
+    fp_registry_init();
+    REQUIRE(fp_registry_add_fidl_if(&client_if));
+    REQUIRE(fp_registry_add_fidl_if(&bcast_if));
+    REQUIRE(fp_registry_add_fidl_if(&server_if));
+
+    internal_test_env.clear();
+    internal_test_env.dummy_send_cbk_ret_val = true;
+
+    resp_cnt      = 0;
+    resp_status   = FP_CMD_STATUS_MAX;
+    p_resp_data   = nullptr;
+    srv_status    = FP_CMD_STATUS_MAX;
+    bcast_status  = FP_CMD_STATUS_MAX;
+    p_sys_ctx     = &test_sys_ctx;
+    rx_dispatched = false;
+
+    fp_disp_session_mgr_init(&test_sys_ctx);
+
+    int          app_ctx = 0;
+    fp_msg_hdr_t req_hdr = {};
+
+    fp_dispatch_info_t req_ctx = {};
+    req_ctx.p_sys_ctx          = &test_sys_ctx;
+    req_ctx.p_comm_params      = &app_ctx;
+
+    auto *const p_sess0 = &test_sys_ctx.client_session_pools[0];
+
+    // the integrator sets the pool-wide response capacity at init
+    for (auto &sess : test_sys_ctx.client_session_pools)
+    {
+        sess.resp_data_max_size = 64U;
+    }
+
+    // a full-size response (header and payload) to the open async request, with the given wire status
+    std::array<uint8_t, resp_size> async_rx = {};
+    fp_dispatch_info_t             rx_ctx   = {};
+    rx_ctx.p_sys_ctx                        = &test_sys_ctx;
+    rx_ctx.p_comm_params                    = &app_ctx;
+    rx_ctx.p_data                           = async_rx.data();
+    rx_ctx.data_size                        = resp_size;
+
+    auto send_async_and_reply = [&](const fp_cmd_status_t status) {
+        REQUIRE(FP_CMD_STATUS_NOERROR == fp_disp_client_send_req(&req_ctx, client_if_id, test_fn_id, FP_FRAME_TYPE_REQ,
+                                                                 reinterpret_cast<uint8_t *>(&req_hdr), sizeof(req_hdr),
+                                                                 nullptr, &resp_handler, test_timeout));
+        fp_msg_hdr_t hdr = p_sess0->base.req_fp_hdr;
+        hdr.func_id |= RESP_BIT_MASK;
+        hdr.status = status;
+        async_rx.fill(0x5A);
+        (void)memcpy(async_rx.data(), &hdr, sizeof(hdr));
+
+        REQUIRE(fp_disp_execute(&rx_ctx));
+    };
+
+    // a sync request whose response, with the given wire status, arrives while the requester waits
+    std::array<uint8_t, resp_size> user_buf = {};
+
+    auto send_sync = [&](const fp_cmd_status_t status) {
+        wire_status = status;
+        user_buf.fill(0xEE);
+        env::fp_arch_wait_for_event.retval      = true;
+        env::fp_arch_wait_for_event.p_user_stub = &deliver_resp_during_wait;
+
+        const fp_cmd_status_t ret = fp_disp_client_send_req_bounded(&req_ctx, client_if_id, test_fn_id, FP_FRAME_TYPE_REQ,
+                                                                    reinterpret_cast<uint8_t *>(&req_hdr), sizeof(req_hdr),
+                                                                    user_buf.data(), static_cast<uint32_t>(user_buf.size()),
+                                                                    nullptr, test_timeout);
+        env::fp_arch_wait_for_event.p_user_stub = nullptr;
+
+        REQUIRE(rx_dispatched);
+        return ret;
+    };
+
+    SECTION("An async handler gets the error status of a full-size response")
+    {
+        const fp_cmd_status_t status = GENERATE(FP_CMD_STATUS_FUNC_NOT_SUPPORTED,
+                                                FP_CMD_STATUS_INVARGS,
+                                                FP_CMD_STATUS_REQ_ATTR_ERR,
+                                                FP_CMD_STATUS_DATA_INTEGRITY_ERR);
+        CAPTURE(status);
+
+        send_async_and_reply(status);
+
+        REQUIRE(1 == resp_cnt);
+        REQUIRE(status == resp_status);
+        // the data stays available to the handler; the status tells it not to trust it
+        REQUIRE(async_rx.data() == p_resp_data);
+    }
+
+    SECTION("A sync request returns the error status of a full-size response and gets a zeroed buffer")
+    {
+        const fp_cmd_status_t status = GENERATE(FP_CMD_STATUS_FUNC_NOT_SUPPORTED,
+                                                FP_CMD_STATUS_INVARGS,
+                                                FP_CMD_STATUS_REQ_ATTR_ERR,
+                                                FP_CMD_STATUS_DATA_INTEGRITY_ERR);
+        CAPTURE(status);
+
+        REQUIRE(status == send_sync(status));
+        REQUIRE(0U == req_ctx.data_size);
+        for (const auto byte : user_buf)
+        {
+            REQUIRE(0 == byte);
+        }
+    }
+
+    SECTION("A NOERROR response still delivers its data")
+    {
+        send_async_and_reply(FP_CMD_STATUS_NOERROR);
+        REQUIRE(FP_CMD_STATUS_NOERROR == resp_status);
+        REQUIRE(async_rx.data() == p_resp_data);
+
+        REQUIRE(FP_CMD_STATUS_NOERROR == send_sync(FP_CMD_STATUS_NOERROR));
+        REQUIRE(resp_size == req_ctx.data_size);
+        REQUIRE(0 == memcmp(user_buf.data(), rx_buf.data(), resp_size));
+    }
+
+    SECTION("ARMED and DISARMED responses still pass through to async and sync requesters")
+    {
+        const fp_cmd_status_t status = GENERATE(FP_CMD_STATUS_ARMED, FP_CMD_STATUS_DISARMED);
+        CAPTURE(status);
+
+        send_async_and_reply(status);
+        REQUIRE(1 == resp_cnt);
+        REQUIRE(status == resp_status);
+
+        REQUIRE(status == send_sync(status));
+    }
+
+    SECTION("A request frame is still handed to the server with status NOERROR")
+    {
+        fp_msg_hdr_t hdr = {};
+        hdr.iface_id     = server_if_id;
+        fp_proto_set_function_type(&hdr, test_fn_id, FP_FRAME_TYPE_REQ);
+        hdr.status = FP_CMD_STATUS_FUNC_NOT_SUPPORTED; // a sender must send 0; whatever arrives is reset
+
+        fp_dispatch_info_t ctx = {};
+        ctx.p_sys_ctx          = &test_sys_ctx;
+        ctx.p_data             = reinterpret_cast<uint8_t *>(&hdr);
+        ctx.data_size          = sizeof(hdr);
+
+        REQUIRE(fp_disp_execute(&ctx));
+        REQUIRE(FP_CMD_STATUS_NOERROR == srv_status);
+    }
+
+    SECTION("A broadcast frame is still handed to the client with status NOERROR")
+    {
+        fp_msg_hdr_t hdr = {};
+        hdr.iface_id     = server_if_id;
+        fp_proto_set_function_type(&hdr, test_fn_id + 1U, FP_FRAME_TYPE_BROADCAST);
+        hdr.status = FP_CMD_STATUS_FUNC_NOT_SUPPORTED;
+
+        fp_dispatch_info_t ctx = {};
+        ctx.p_sys_ctx          = &test_sys_ctx;
+        ctx.p_data             = reinterpret_cast<uint8_t *>(&hdr);
+        ctx.data_size          = sizeof(hdr);
+
+        REQUIRE(fp_disp_execute(&ctx));
+        REQUIRE(FP_CMD_STATUS_NOERROR == bcast_status);
     }
 }
