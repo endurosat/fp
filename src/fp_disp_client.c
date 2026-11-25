@@ -347,6 +347,83 @@ static fp_cmd_status_t fp_disp_client_resp_status(const fp_dispatch_info_t *p_di
     return (fp_cmd_status_t)p_fp_hdr->status;
 }
 
+/** @brief Fill the caller buffer of a synchronous request from a received response
+ *
+ *  Copies the response into the caller buffer when the status is NOERROR and the response fits;
+ *  otherwise clears the buffer. Every write is bounded by the tighter of the pool capacity, the
+ *  per-request caller buffer and, when known, the typed response size.
+ *
+ *  @param[in,out] p_client_session sync client session that takes the response
+ *  @param[in]     p_disp_ctx       dispatch context holding the received frame
+ *  @param[in]     resp_type_size   FIDL-declared size of the response, header included
+ *  @param[in]     size_validated   true if resp_type_size is the typed size (registered-client route)
+ *  @param[in]     status           status the client gets so far
+ *
+ *  @returns the status for the caller: UNEXP_FRM_SIZE if a NOERROR response does not fit, else status
+ */
+static fp_cmd_status_t fp_disp_client_copy_sync_resp(fp_disp_client_session_t *p_client_session,
+                                                     const fp_dispatch_info_t *p_disp_ctx,
+                                                     const uint32_t            resp_type_size,
+                                                     const bool                size_validated,
+                                                     fp_cmd_status_t           status)
+{
+    const fp_msg_hdr_t *p_fp_hdr = (const fp_msg_hdr_t *)p_disp_ctx->p_data;
+    (void)p_fp_hdr; // suppress 'unused variable' warning in case the trace macros below are disabled
+
+    fp_arch_assert(NULL != p_client_session->p_resp_data);
+    uint8_t *const p_resp_data = p_client_session->p_resp_data;
+
+    // bound writes to the tighter of the pool capacity and the per-request caller
+    // buffer (resp_buf_user_max, 0 == not specified)
+    uint32_t resp_bound = p_client_session->resp_data_max_size;
+    if ((0U != p_client_session->resp_buf_user_max) &&
+        (p_client_session->resp_buf_user_max < resp_bound))
+    {
+        resp_bound = p_client_session->resp_buf_user_max;
+    }
+
+    // The caller buffer holds one typed response. When the typed size is known, it is the
+    // hard limit for every write into that buffer. The pool-wide capacity can be much larger
+    // than the caller struct. A clear of the full capacity destroys the caller stack.
+    if ((true == size_validated) && (resp_type_size < resp_bound))
+    {
+        resp_bound = resp_type_size;
+    }
+
+    if (NULL != p_resp_data)
+    {
+        if (FP_CMD_STATUS_NOERROR == status)
+        {
+            if (p_disp_ctx->data_size <= resp_bound)
+            {
+                (void)memcpy(p_resp_data,
+                             p_disp_ctx->p_data,
+                             p_disp_ctx->data_size);
+
+                // record the delivered length for the caller
+                p_client_session->resp_data_size = p_disp_ctx->data_size;
+            }
+            else
+            {
+                FP_ARCH_TRACE_WARN("Response too large for user buffer: received=%u, max=%u, frame='%u:%lu:%u'",
+                                   p_disp_ctx->data_size, resp_bound,
+                                   p_fp_hdr->iface_id, p_fp_hdr->func_id, p_fp_hdr->cmd_id);
+
+                (void)memset(p_resp_data, 0, resp_bound);
+                p_client_session->resp_data_size = 0U;
+                status = FP_CMD_STATUS_UNEXP_FRM_SIZE;
+            }
+        }
+        else
+        {
+            (void)memset(p_resp_data, 0, resp_bound);
+            p_client_session->resp_data_size = 0U;
+        }
+    }
+
+    return status;
+}
+
 static bool fp_disp_client_handle_resp_impl(fp_dispatch_info_t *p_disp_ctx,
                                             const uint32_t      resp_type_size,
                                             const bool          size_validated)
@@ -427,56 +504,8 @@ static bool fp_disp_client_handle_resp_impl(fp_dispatch_info_t *p_disp_ctx,
         //    in the thread context where the response is received which is a different thread than the user one)
         // 2. signal the user thread to unblock and process the response
 
-        fp_arch_assert(NULL != p_client_session->p_resp_data);
-        uint8_t *const p_resp_data = p_client_session->p_resp_data;
-
-        // bound writes to the tighter of the pool capacity and the per-request caller
-        // buffer (resp_buf_user_max, 0 == not specified)
-        uint32_t resp_bound = p_client_session->resp_data_max_size;
-        if ((0U != p_client_session->resp_buf_user_max) &&
-            (p_client_session->resp_buf_user_max < resp_bound))
-        {
-            resp_bound = p_client_session->resp_buf_user_max;
-        }
-
-        // The caller buffer holds one typed response. When the typed size is known, it is the
-        // hard limit for every write into that buffer. The pool-wide capacity can be much larger
-        // than the caller struct. A clear of the full capacity destroys the caller stack.
-        if ((true == size_validated) && (resp_type_size < resp_bound))
-        {
-            resp_bound = resp_type_size;
-        }
-
-        if (NULL != p_resp_data)
-        {
-            if (FP_CMD_STATUS_NOERROR == user_cbk_status)
-            {
-                if (p_disp_ctx->data_size <= resp_bound)
-                {
-                    (void)memcpy(p_resp_data,
-                                 p_disp_ctx->p_data,
-                                 p_disp_ctx->data_size);
-
-                    // record the delivered length for the caller
-                    p_client_session->resp_data_size = p_disp_ctx->data_size;
-                }
-                else
-                {
-                    FP_ARCH_TRACE_WARN("Response too large for user buffer: received=%u, max=%u, frame='%u:%lu:%u'",
-                                       p_disp_ctx->data_size, resp_bound,
-                                       p_fp_hdr->iface_id, p_fp_hdr->func_id, p_fp_hdr->cmd_id);
-
-                    (void)memset(p_resp_data, 0, resp_bound);
-                    p_client_session->resp_data_size = 0U;
-                    user_cbk_status = FP_CMD_STATUS_UNEXP_FRM_SIZE;
-                }
-            }
-            else
-            {
-                (void)memset(p_resp_data, 0, resp_bound);
-                p_client_session->resp_data_size = 0U;
-            }
-        }
+        user_cbk_status = fp_disp_client_copy_sync_resp(p_client_session, p_disp_ctx, resp_type_size,
+                                                        size_validated, user_cbk_status);
 
         // propagate protocol violation status so send_req can return it to the caller
         p_client_session->base.req_fp_hdr.status = (uint8_t) user_cbk_status;
