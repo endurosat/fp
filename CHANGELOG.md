@@ -27,6 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   release handler, both without any fp lock held. For such transports `p_close` now
   runs right after the response instead of at the timeout. Transports that close the
   session from `p_track` or `p_deliver`, such as fp_csp_binder, are not affected.
+- The unit tests no longer abort when they are built with standard-library
+  assertions on (for example `-D_GLIBCXX_ASSERTIONS`). The SYNC session
+  tracking test read the last element of an empty stub call list; it now
+  checks that the list is empty. Contributed by
+  [@amirthn6533](https://github.com/amirthn6533).
 
 - A client now gets the status the server sent in its response.
   - `fp_disp_execute` used to set the status of every frame to
