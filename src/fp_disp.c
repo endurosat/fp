@@ -61,6 +61,15 @@
 static bool fp_disp_route_unmatched(fp_dispatch_info_t         *p_disp_ctx,
                                     const fp_proto_func_attr_t *p_fp_attr);
 
+/** @brief Set the status a registered callback sees for a frame.
+ *
+ *  A response carries the server's result in its status, so the client handler must see it as
+ *  received. A request carries no result, and a server broadcast has no request that could fail
+ *  (the sender always sets NOERROR), so both get a defined NOERROR, whatever the frame carried.
+ */
+static void fp_disp_prepare_status(fp_msg_hdr_t               *p_fp_hdr,
+                                   const fp_proto_func_attr_t *p_fp_attr);
+
 /*
 ***************************************************************************************************
 * EXTERNAL (NON STATIC) ROUTINES DEFINITION
@@ -107,14 +116,7 @@ bool fp_disp_execute(fp_dispatch_info_t *p_disp_ctx)
 
             if ((NULL != p_func) && (NULL != p_func->p_on_func_cbk))
             {
-                // A response carries the server's result in its status, so the client handler must
-                // see it as received. A request carries no result, and a server broadcast has no
-                // request that could fail (the sender always sets NOERROR), so both get a defined
-                // NOERROR before their callback runs, whatever the frame carried.
-                if (FP_FRAME_TYPE_RESP != fp_attr.frame_type)
-                {
-                    p_fp_hdr->status = FP_CMD_STATUS_NOERROR;
-                }
+                fp_disp_prepare_status(p_fp_hdr, &fp_attr);
 
                 (*p_func->p_on_func_cbk)(p_disp_ctx);
                 fidl_func_called = true;
@@ -213,4 +215,13 @@ static bool fp_disp_route_unmatched(fp_dispatch_info_t         *p_disp_ctx,
                        ((const fp_msg_hdr_t *)p_disp_ctx->p_data)->func_id,
                        p_fp_attr->frame_type);
     return false;
+}
+
+static void fp_disp_prepare_status(fp_msg_hdr_t               *p_fp_hdr,
+                                   const fp_proto_func_attr_t *p_fp_attr)
+{
+    if (FP_FRAME_TYPE_RESP != p_fp_attr->frame_type)
+    {
+        p_fp_hdr->status = FP_CMD_STATUS_NOERROR;
+    }
 }
