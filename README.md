@@ -912,6 +912,24 @@ Edit `fp_config.h` to set system limits:
 #define ARMED_REQ_TOUT_S ((uint16_t)(15 * 60))
 ```
 
+**Step 4: Choose the Library Type (CMake)**
+The CMake cache variable `FP_LIBRARY_TYPE` selects how `svc_fp` is built:
+`STATIC` or `SHARED`. If you do not set it, fp builds a shared library on
+Windows and Linux and a static library on every other platform. Set it on the
+command line, or in your project before `add_subdirectory()`:
+```bash
+cmake -S . -B build -DFP_LIBRARY_TYPE=STATIC
+```
+```cmake
+set(FP_LIBRARY_TYPE STATIC CACHE STRING "fp library type")
+add_subdirectory(path/to/fp)
+```
+Any other value stops the configuration with an error. A static build adds
+the public compile definition `FP_STATIC`, which gives `FP_API` an empty
+definition, so code that links fp statically on Windows gets no
+`__declspec(dllimport)` declarations. A shared build on Windows compiles fp
+with `FP_EXPORTS`, so that `FP_API` exports the API from the DLL.
+
 ### 2. Basic Usage Example
 
 All examples below assume that the underlying FP transport layer is properly configured and functional.
@@ -1373,9 +1391,13 @@ Recommended integration test scenarios:
 ### Building and Running the Tests
 
 Requirements: CMake 3.14 or newer, a C11 and C++14 compiler (GCC or Clang),
-git, and [gcovr](https://gcovr.com) for the coverage target. Catch2 v3 is used
-from the system when installed, otherwise it is fetched from GitHub. The
-`.devcontainer.json` provides a ready environment.
+and git. [gcovr](https://gcovr.com) is needed only for the coverage target:
+without it, CMake prints a warning and does not create `gen-test-coverage`.
+Catch2 v3 is used from the system when installed, otherwise it is fetched from
+GitHub. The `.devcontainer.json` provides a ready environment.
+
+The tests link fp as a static library by default. To test the shared library,
+add `-DFP_LIBRARY_TYPE=SHARED` to the first `cmake` command.
 
 ```bash
 cmake -S test -B build/test

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The CMake cache variable `FP_LIBRARY_TYPE` selects the fp library type:
+  `STATIC` or `SHARED`. Set it with `-DFP_LIBRARY_TYPE=...` or in the parent
+  project before `add_subdirectory()`. If it is not set, the default is the
+  same as before: shared on Windows and Linux, static on every other
+  platform. Any other value stops the configuration with an error.
+- A static build defines `FP_STATIC` publicly, and `FP_API` is then empty,
+  so a static fp on Windows has no `__declspec(dllimport)` declarations.
+  Contributed by [@amirthn6533](https://github.com/amirthn6533).
+
+### Changed
+
+- The unit tests link fp statically by default, so that they also build on
+  Windows. `-DFP_LIBRARY_TYPE=SHARED` still selects the shared library.
+- gcovr is now optional for the unit tests: without it, CMake prints a
+  warning and does not create the `gen-test-coverage` target, instead of
+  stopping. Contributed by [@amirthn6533](https://github.com/amirthn6533).
+
 ### Fixed
 
 - A regular server function (one not configured for ARM-and-FIRE) no longer
