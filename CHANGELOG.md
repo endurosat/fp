@@ -26,6 +26,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   warning and does not create the `gen-test-coverage` target, instead of
   stopping. Contributed by [@amirthn6533](https://github.com/amirthn6533).
 
+### Deprecated
+
+- `fp_disp_client_send_req` is deprecated and will be removed in a later
+  release. It takes no response buffer size, so a synchronous reply is bounded
+  only by the FIDL response size or the pool-wide session capacity, which is
+  usually larger than the caller buffer. Call
+  `fp_disp_client_send_req_bounded` and pass the size of the response buffer
+  (0 only for an asynchronous request with no response buffer). GCC, Clang and
+  MSVC now warn at every call site; a build with `-Werror` must migrate or
+  silence `-Wdeprecated-declarations`. The new `FP_DEPRECATED(msg)` macro in
+  `fp_defs.h` provides the attribute.
+
 ### Fixed
 
 - A regular server function (one not configured for ARM-and-FIRE) no longer

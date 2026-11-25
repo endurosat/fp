@@ -1195,7 +1195,7 @@ TEST_CASE("Test lock failure scenarios in client send request", "[dispatch][clie
         uint8_t req_buffer[sizeof(fp_msg_hdr_t)] = { 0 };
         uint8_t resp_buffer[sizeof(fp_msg_hdr_t)] = { 0 };
 
-        fp_cmd_status_t status = fp_disp_client_send_req(
+        fp_cmd_status_t status = fp_disp_client_send_req_bounded(
             &test_dispatch_info,
             test_fidl_if.fidl_if_id,
             test_fidl_func_list[0].func_id,
@@ -1203,6 +1203,7 @@ TEST_CASE("Test lock failure scenarios in client send request", "[dispatch][clie
             req_buffer,
             sizeof(req_buffer),
             resp_buffer,
+            sizeof(resp_buffer),
             nullptr,
             test_timeout
         );
@@ -4065,13 +4066,13 @@ TEST_CASE("Test FP client requests", "[dispatch]")
     SECTION("Test FP client requests with invalid args")
     {
         // trigger validity check for nullptr passed as the dispatch context
-        REQUIRE(FP_CMD_STATUS_INVARGS == fp_disp_client_send_req(nullptr, 0, 0, FP_FRAME_TYPE_REQ, nullptr, 0, nullptr, nullptr, 0));
+        REQUIRE(FP_CMD_STATUS_INVARGS == fp_disp_client_send_req_bounded(nullptr, 0, 0, FP_FRAME_TYPE_REQ, nullptr, 0, nullptr, 0U, nullptr, 0));
         // trigger validity check for nullptr passed as request data
-        REQUIRE(FP_CMD_STATUS_INVARGS == fp_disp_client_send_req(&test_dispatch_info, 0, 0, FP_FRAME_TYPE_REQ, nullptr, 0, nullptr, nullptr, 0));
+        REQUIRE(FP_CMD_STATUS_INVARGS == fp_disp_client_send_req_bounded(&test_dispatch_info, 0, 0, FP_FRAME_TYPE_REQ, nullptr, 0, nullptr, 0U, nullptr, 0));
         // trigger validity check for messages which do are less than the FP header in size
-        REQUIRE(FP_CMD_STATUS_INVARGS == fp_disp_client_send_req(&test_dispatch_info, 0, 0, FP_FRAME_TYPE_REQ, test_dispatch_info.p_data, sizeof(fp_msg_hdr_t) - 1, nullptr, nullptr, 0));
+        REQUIRE(FP_CMD_STATUS_INVARGS == fp_disp_client_send_req_bounded(&test_dispatch_info, 0, 0, FP_FRAME_TYPE_REQ, test_dispatch_info.p_data, sizeof(fp_msg_hdr_t) - 1, nullptr, 0U, nullptr, 0));
         // trigger validity check for broadcast frame type (not allowed for client requests)
-        REQUIRE(FP_CMD_STATUS_INVARGS == fp_disp_client_send_req(&test_dispatch_info, 0, 0, FP_FRAME_TYPE_BROADCAST, test_dispatch_info.p_data, sizeof(fp_msg_hdr_t), reinterpret_cast<uint8_t *>(some_ptr_addr), nullptr, 0));
+        REQUIRE(FP_CMD_STATUS_INVARGS == fp_disp_client_send_req_bounded(&test_dispatch_info, 0, 0, FP_FRAME_TYPE_BROADCAST, test_dispatch_info.p_data, sizeof(fp_msg_hdr_t), reinterpret_cast<uint8_t *>(some_ptr_addr), sizeof(fp_msg_hdr_t), nullptr, 0));
     }
 
     SECTION("Test FP client request when there are no available client sessions to open")
@@ -4082,7 +4083,7 @@ TEST_CASE("Test FP client requests", "[dispatch]")
             atomic_store(&client_sess.base.state, FP_SESSION_STATE_ACTIVE);
         }
 
-        REQUIRE(FP_CMD_STATUS_NO_MEM == fp_disp_client_send_req(&test_dispatch_info, 0, 0, FP_FRAME_TYPE_REQ, reinterpret_cast<uint8_t *>(some_ptr_addr), sizeof(fp_msg_hdr_t), reinterpret_cast<uint8_t *>(some_ptr_addr), nullptr, test_timeout));
+        REQUIRE(FP_CMD_STATUS_NO_MEM == fp_disp_client_send_req_bounded(&test_dispatch_info, 0, 0, FP_FRAME_TYPE_REQ, reinterpret_cast<uint8_t *>(some_ptr_addr), sizeof(fp_msg_hdr_t), reinterpret_cast<uint8_t *>(some_ptr_addr), sizeof(fp_msg_hdr_t), nullptr, test_timeout));
     }
 
     SECTION("Test sending a synchronous FP client request (bus send succeeds)")
@@ -4116,7 +4117,7 @@ TEST_CASE("Test FP client requests", "[dispatch]")
         ((fp_msg_hdr_t *)(local_msg))->func_id  = 0;
 
         // we don't care about the actual validity of the p_resp parameter (it must be non-NULL only) because it is not used by this function
-        REQUIRE(FP_CMD_STATUS_NOERROR == fp_disp_client_send_req(&local_ctx, test_if_id, test_func_id, FP_FRAME_TYPE_REQ, local_msg, test_data_size, reinterpret_cast<uint8_t *>(some_ptr_addr), nullptr, test_timeout));
+        REQUIRE(FP_CMD_STATUS_NOERROR == fp_disp_client_send_req_bounded(&local_ctx, test_if_id, test_func_id, FP_FRAME_TYPE_REQ, local_msg, test_data_size, reinterpret_cast<uint8_t *>(some_ptr_addr), sizeof(fp_msg_hdr_t), nullptr, test_timeout));
         REQUIRE(1 == env::fp_arch_init_event.call_cnt);
         REQUIRE(1 == env::fp_arch_wait_for_event.call_cnt);
         // check that the passed interface ID and function ID have been transferred correctly to the dispatch context
@@ -4139,6 +4140,32 @@ TEST_CASE("Test FP client requests", "[dispatch]")
         REQUIRE(internal_test_env.dummy_send_cbk_called);
     }
 
+    SECTION("Deprecated fp_disp_client_send_req passes no response size to the shared implementation")
+    {
+        atomic_store(&test_sys_ctx.client_session_pools[0].base.state, FP_SESSION_STATE_INACTIVE);
+
+        env::fp_arch_wait_for_event.retval       = true;
+        internal_test_env.dummy_send_cbk_ret_val = true;
+
+        uint8_t resp_buf[sizeof(fp_msg_hdr_t)] = {};
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+        const fp_cmd_status_t status = fp_disp_client_send_req(&test_dispatch_info, test_if_id, test_func_id, FP_FRAME_TYPE_REQ,
+                                                               test_dispatch_info.p_data, test_dispatch_info.data_size,
+                                                               resp_buf, nullptr, test_timeout);
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
+
+        // a synchronous request without a size is still accepted by this release
+        REQUIRE(FP_CMD_STATUS_NOERROR == status);
+        REQUIRE(1 == env::fp_arch_wait_for_event.call_cnt);
+        REQUIRE(0U == test_sys_ctx.client_session_pools[0].resp_buf_user_max);
+    }
+
     SECTION("Test sending a synchronous FP client request (bus send succeeds but the reply times out)")
     {
         // ensure there is at least one available client session slot to reseve
@@ -4156,7 +4183,7 @@ TEST_CASE("Test FP client requests", "[dispatch]")
         REQUIRE(0 == env::fp_arch_start_timer.call_cnt);
 
         // we don't care about the actual validity of the p_resp parameter (it must be non-NULL only) because it is not used by this function
-        REQUIRE(FP_CMD_STATUS_TIMEOUT == fp_disp_client_send_req(&test_dispatch_info, 0, 0, FP_FRAME_TYPE_REQ, test_dispatch_info.p_data, test_dispatch_info.data_size, reinterpret_cast<uint8_t *>(some_ptr_addr), nullptr, test_timeout));
+        REQUIRE(FP_CMD_STATUS_TIMEOUT == fp_disp_client_send_req_bounded(&test_dispatch_info, 0, 0, FP_FRAME_TYPE_REQ, test_dispatch_info.p_data, test_dispatch_info.data_size, reinterpret_cast<uint8_t *>(some_ptr_addr), sizeof(fp_msg_hdr_t), nullptr, test_timeout));
         REQUIRE(1 == env::fp_arch_wait_for_event.call_cnt);
 
         // the frame is expected to be sent over the bus
@@ -4180,7 +4207,7 @@ TEST_CASE("Test FP client requests", "[dispatch]")
         REQUIRE(0 == env::fp_arch_start_timer.call_cnt);
 
         // we don't care about the actual validity of the p_resp parameter (it must be non-NULL only) because it is not used by this function
-        REQUIRE(FP_CMD_STATUS_SENDERR == fp_disp_client_send_req(&test_dispatch_info, 0, 0, FP_FRAME_TYPE_REQ, test_dispatch_info.p_data, test_dispatch_info.data_size, reinterpret_cast<uint8_t *>(some_ptr_addr), nullptr, test_timeout));
+        REQUIRE(FP_CMD_STATUS_SENDERR == fp_disp_client_send_req_bounded(&test_dispatch_info, 0, 0, FP_FRAME_TYPE_REQ, test_dispatch_info.p_data, test_dispatch_info.data_size, reinterpret_cast<uint8_t *>(some_ptr_addr), sizeof(fp_msg_hdr_t), nullptr, test_timeout));
         // no waiting for reply event if the request was not sent in the first place
         REQUIRE(0 == env::fp_arch_wait_for_event.call_cnt);
 
@@ -4206,13 +4233,14 @@ TEST_CASE("Test FP client requests", "[dispatch]")
         // we don't care about the actual validity of the p_resp and p_resp_handler parameters (they must be non-NULL only)
         // because they are not dereferenced by this function (note that p_resp_handler parameter indirectly determines the type of request, e.g.
         // if there is a response callback provided, then the request is expected to be asynchronously executed)
-        REQUIRE(FP_CMD_STATUS_NOERROR == fp_disp_client_send_req(&test_dispatch_info,
+        REQUIRE(FP_CMD_STATUS_NOERROR == fp_disp_client_send_req_bounded(&test_dispatch_info,
                                                                  0,
                                                                  0,
                                                                  FP_FRAME_TYPE_REQ,
                                                                  test_dispatch_info.p_data,
                                                                  test_dispatch_info.data_size,
                                                                  reinterpret_cast<uint8_t *>(some_ptr_addr),
+                                                                 sizeof(fp_msg_hdr_t),
                                                                  reinterpret_cast<fp_generic_response_handler_t>(some_ptr_addr),
                                                                  test_timeout));
         // no blocking wait for asynchronous events...
@@ -4288,13 +4316,14 @@ TEST_CASE("Test FP client requests", "[dispatch]")
         env::fp_arch_lock_section.p_user_stub = lock_stub;
         env::fp_arch_lock_section.retval = true;
 
-        fp_cmd_status_t status = fp_disp_client_send_req(&test_dispatch_info,
+        fp_cmd_status_t status = fp_disp_client_send_req_bounded(&test_dispatch_info,
                                                          0,
                                                          0,
                                                          FP_FRAME_TYPE_REQ,
                                                          test_dispatch_info.p_data,
                                                          test_dispatch_info.data_size,
                                                          reinterpret_cast<uint8_t *>(some_ptr_addr),
+                                                         sizeof(fp_msg_hdr_t),
                                                          reinterpret_cast<fp_generic_response_handler_t>(some_ptr_addr),
                                                          test_timeout);
 
@@ -5775,7 +5804,7 @@ TEST_CASE("Test client request with various timeout scenarios", "[dispatch][clie
         uint8_t resp_buffer[sizeof(fp_msg_hdr_t)] = { 0 };
 
         // Send request with zero timeout
-        fp_cmd_status_t status = fp_disp_client_send_req(
+        fp_cmd_status_t status = fp_disp_client_send_req_bounded(
             &test_dispatch_info,
             test_fidl_if.fidl_if_id,
             test_fidl_func_list[0].func_id,
@@ -5783,6 +5812,7 @@ TEST_CASE("Test client request with various timeout scenarios", "[dispatch][clie
             req_buffer,
             sizeof(req_buffer),
             resp_buffer,
+            sizeof(resp_buffer),
             nullptr,
             0  // Zero timeout
         );
@@ -5850,7 +5880,7 @@ TEST_CASE("Test session pool exhaustion scenarios", "[dispatch][session][coverag
             dispatch_info.p_data    = reinterpret_cast<uint8_t *>(&msg_hdrs.back());
             dispatch_info.data_size = sizeof(fp_msg_hdr_t);
 
-            fp_cmd_status_t status = fp_disp_client_send_req(
+            fp_cmd_status_t status = fp_disp_client_send_req_bounded(
                 &dispatch_info,
                 test_fidl_if.fidl_if_id,
                 test_fidl_func_list[0].func_id,
@@ -5858,6 +5888,7 @@ TEST_CASE("Test session pool exhaustion scenarios", "[dispatch][session][coverag
                 req_buffers.back().data(),
                 req_buffers.back().size(),
                 resp_buffers.back().data(),
+                resp_buffers.back().size(),
                 &test_client_resp_handler_cbk,  // async request -> session stays open in-flight
                 test_timeout
             );
@@ -5892,7 +5923,7 @@ TEST_CASE("Test session pool exhaustion scenarios", "[dispatch][session][coverag
             dispatch_info.p_data    = reinterpret_cast<uint8_t *>(&msg_hdr);
             dispatch_info.data_size = sizeof(fp_msg_hdr_t);
 
-            fp_cmd_status_t status = fp_disp_client_send_req(
+            fp_cmd_status_t status = fp_disp_client_send_req_bounded(
                 &dispatch_info,
                 test_fidl_if.fidl_if_id,
                 test_fidl_func_list[0].func_id,
@@ -5900,6 +5931,7 @@ TEST_CASE("Test session pool exhaustion scenarios", "[dispatch][session][coverag
                 req_buf.data(),
                 req_buf.size(),
                 resp_buf.data(),
+                resp_buf.size(),
                 nullptr,
                 test_timeout
             );
@@ -5957,7 +5989,7 @@ TEST_CASE("Test response handling with various buffer sizes", "[dispatch][client
         uint8_t resp_buffer[sizeof(fp_msg_hdr_t)] = { 0 };
 
         // Send request with minimum valid buffer size
-        fp_cmd_status_t status = fp_disp_client_send_req(
+        fp_cmd_status_t status = fp_disp_client_send_req_bounded(
             &test_dispatch_info,
             test_fidl_if.fidl_if_id,
             test_fidl_func_list[0].func_id,
@@ -5965,6 +5997,7 @@ TEST_CASE("Test response handling with various buffer sizes", "[dispatch][client
             req_buffer,
             sizeof(fp_msg_hdr_t),  // Minimum size
             resp_buffer,
+            sizeof(resp_buffer),
             nullptr,
             test_timeout
         );
@@ -5984,7 +6017,7 @@ TEST_CASE("Test response handling with various buffer sizes", "[dispatch][client
         uint8_t resp_buffer[sizeof(fp_msg_hdr_t)] = { 0 };
 
         // Send request with buffer size less than header size
-        fp_cmd_status_t status = fp_disp_client_send_req(
+        fp_cmd_status_t status = fp_disp_client_send_req_bounded(
             &test_dispatch_info,
             test_fidl_if.fidl_if_id,
             test_fidl_func_list[0].func_id,
@@ -5992,6 +6025,7 @@ TEST_CASE("Test response handling with various buffer sizes", "[dispatch][client
             req_buffer,
             sizeof(fp_msg_hdr_t) - 1,  // Less than minimum
             resp_buffer,
+            sizeof(resp_buffer),
             nullptr,
             test_timeout
         );
@@ -6047,7 +6081,7 @@ TEST_CASE("Test async request handling", "[dispatch][client][coverage]")
         uint8_t resp_buffer[sizeof(fp_msg_hdr_t)] = { 0 };
 
         // Send async request with response handler
-        fp_cmd_status_t status = fp_disp_client_send_req(
+        fp_cmd_status_t status = fp_disp_client_send_req_bounded(
             &test_dispatch_info,
             test_fidl_if.fidl_if_id,
             test_fidl_func_list[0].func_id,
@@ -6055,6 +6089,7 @@ TEST_CASE("Test async request handling", "[dispatch][client][coverage]")
             req_buffer,
             sizeof(req_buffer),
             resp_buffer,
+            sizeof(resp_buffer),
             &test_client_resp_handler_cbk,  // Async handler with correct signature
             test_timeout
         );
@@ -6501,9 +6536,10 @@ TEST_CASE("Test async client request release handler", "[dispatch][client][relea
     auto *const p_sess0 = &test_sys_ctx.client_session_pools[0];
 
     auto send_async = [&]() {
-        return fp_disp_client_send_req(&disp_ctx, test_if_id, test_func_id, FP_FRAME_TYPE_REQ,
-                                       reinterpret_cast<uint8_t *>(&req_hdr), sizeof(req_hdr),
-                                       nullptr, &release_test::resp_handler, test_timeout);
+        return fp_disp_client_send_req_bounded(&disp_ctx, test_if_id, test_func_id, FP_FRAME_TYPE_REQ,
+                                       reinterpret_cast<uint8_t *>(&req_hdr),
+                                       sizeof(req_hdr),
+                                       nullptr, 0U, &release_test::resp_handler, test_timeout);
     };
 
     SECTION("Session init leaves no release handler armed and the server sessions have no release hook")
@@ -6632,9 +6668,9 @@ TEST_CASE("Test async client request release handler", "[dispatch][client][relea
     {
         // the response handler marks the session as a concurrent locked tracker phase would after
         // the timeout; the response path must not turn that mark into a plain close
-        REQUIRE(FP_CMD_STATUS_NOERROR == fp_disp_client_send_req(&disp_ctx, test_if_id, test_func_id, FP_FRAME_TYPE_REQ,
-                                                                 reinterpret_cast<uint8_t *>(&req_hdr), sizeof(req_hdr),
-                                                                 nullptr, &release_test::resp_handler_marks_timeout, test_timeout));
+        REQUIRE(FP_CMD_STATUS_NOERROR == fp_disp_client_send_req_bounded(&disp_ctx, test_if_id, test_func_id, FP_FRAME_TYPE_REQ,
+                                                                         reinterpret_cast<uint8_t *>(&req_hdr), sizeof(req_hdr),
+                                                                         nullptr, 0U, &release_test::resp_handler_marks_timeout, test_timeout));
 
         release_test::dispatch_resp(&p_sess0->base);
 
@@ -6644,9 +6680,9 @@ TEST_CASE("Test async client request release handler", "[dispatch][client][relea
 
     SECTION("A session reused by a new request while the response handler ran is not closed")
     {
-        REQUIRE(FP_CMD_STATUS_NOERROR == fp_disp_client_send_req(&disp_ctx, test_if_id, test_func_id, FP_FRAME_TYPE_REQ,
-                                                                 reinterpret_cast<uint8_t *>(&req_hdr), sizeof(req_hdr),
-                                                                 nullptr, &release_test::resp_handler_sess_reused, test_timeout));
+        REQUIRE(FP_CMD_STATUS_NOERROR == fp_disp_client_send_req_bounded(&disp_ctx, test_if_id, test_func_id, FP_FRAME_TYPE_REQ,
+                                                                         reinterpret_cast<uint8_t *>(&req_hdr), sizeof(req_hdr),
+                                                                         nullptr, 0U, &release_test::resp_handler_sess_reused, test_timeout));
 
         release_test::dispatch_resp(&p_sess0->base);
 
@@ -6708,9 +6744,10 @@ TEST_CASE("Test async client request release handler", "[dispatch][client][relea
 
         uint8_t resp_buf[sizeof(fp_msg_hdr_t)] = {};
 
-        fp_disp_client_send_req(&disp_ctx, test_if_id, test_func_id, FP_FRAME_TYPE_REQ,
-                                reinterpret_cast<uint8_t *>(&req_hdr), sizeof(req_hdr),
-                                resp_buf, nullptr, test_timeout);
+        fp_disp_client_send_req_bounded(&disp_ctx, test_if_id, test_func_id, FP_FRAME_TYPE_REQ,
+                                reinterpret_cast<uint8_t *>(&req_hdr),
+                                sizeof(req_hdr),
+                                resp_buf, sizeof(resp_buf), nullptr, test_timeout);
 
         REQUIRE(release_test::log.events == std::vector<event_t>{ event_t::close });
     }
@@ -6739,9 +6776,10 @@ TEST_CASE("Test async client request release handler", "[dispatch][client][relea
         REQUIRE(FP_CMD_STATUS_NOERROR == send_async());
         // a different interface ID keeps the two sessions apart in response matching
         // (the stubbed command-ID generator gives both requests the same cmd_id)
-        REQUIRE(FP_CMD_STATUS_NOERROR == fp_disp_client_send_req(&disp_ctx_b, test_if_id + 1U, test_func_id, FP_FRAME_TYPE_REQ,
-                                                                 reinterpret_cast<uint8_t *>(&req_hdr), sizeof(req_hdr),
-                                                                 nullptr, &release_test::resp_handler, test_timeout));
+        REQUIRE(FP_CMD_STATUS_NOERROR == fp_disp_client_send_req_bounded(&disp_ctx_b, test_if_id + 1U, test_func_id, FP_FRAME_TYPE_REQ,
+                                                                 reinterpret_cast<uint8_t *>(&req_hdr),
+                                                                 sizeof(req_hdr),
+                                                                 nullptr, 0U, &release_test::resp_handler, test_timeout));
 
         auto *const p_sess1 = &test_sys_ctx.client_session_pools[1];
         REQUIRE(&release_test::released_handler == p_sess0->p_released_handler);
@@ -6772,7 +6810,8 @@ TEST_CASE("Test async client request release handler", "[dispatch][client][relea
     SECTION("The bounded send API arms the release handler too")
     {
         REQUIRE(FP_CMD_STATUS_NOERROR == fp_disp_client_send_req_bounded(&disp_ctx, test_if_id, test_func_id, FP_FRAME_TYPE_REQ,
-                                                                         reinterpret_cast<uint8_t *>(&req_hdr), sizeof(req_hdr),
+                                                                         reinterpret_cast<uint8_t *>(&req_hdr),
+                                                                         sizeof(req_hdr),
                                                                          nullptr, 0U, &release_test::resp_handler, test_timeout));
         REQUIRE(&release_test::released_handler == p_sess0->p_released_handler);
 
@@ -6993,9 +7032,10 @@ TEST_CASE("Test async client request release handler", "[dispatch][client][relea
         zeroed_ctx.p_sys_ctx          = &test_sys_ctx;
         zeroed_ctx.p_comm_params      = &app_ctx;
 
-        REQUIRE(FP_CMD_STATUS_NOERROR == fp_disp_client_send_req(&zeroed_ctx, test_if_id, test_func_id, FP_FRAME_TYPE_REQ,
-                                                                 reinterpret_cast<uint8_t *>(&req_hdr), sizeof(req_hdr),
-                                                                 nullptr, &release_test::resp_handler, test_timeout));
+        REQUIRE(FP_CMD_STATUS_NOERROR == fp_disp_client_send_req_bounded(&zeroed_ctx, test_if_id, test_func_id, FP_FRAME_TYPE_REQ,
+                                                                 reinterpret_cast<uint8_t *>(&req_hdr),
+                                                                 sizeof(req_hdr),
+                                                                 nullptr, 0U, &release_test::resp_handler, test_timeout));
         REQUIRE(nullptr == p_sess0->p_released_handler);
 
         callbacks.p_track = &release_test::track_rx_cbk;
@@ -7079,9 +7119,10 @@ TEST_CASE("Test response dispatch reports whether a client session took the fram
 
     // sends an async request on the given interface and returns a matching NOERROR response header
     auto send_async = [&](const uint16_t if_id) {
-        REQUIRE(FP_CMD_STATUS_NOERROR == fp_disp_client_send_req(&req_ctx, if_id, resp_func_id, FP_FRAME_TYPE_REQ,
-                                                                 reinterpret_cast<uint8_t *>(&req_hdr), sizeof(req_hdr),
-                                                                 nullptr, &resp_dispatch_test::resp_handler, test_timeout));
+        REQUIRE(FP_CMD_STATUS_NOERROR == fp_disp_client_send_req_bounded(&req_ctx, if_id, resp_func_id, FP_FRAME_TYPE_REQ,
+                                                                 reinterpret_cast<uint8_t *>(&req_hdr),
+                                                                 sizeof(req_hdr),
+                                                                 nullptr, 0U, &resp_dispatch_test::resp_handler, test_timeout));
         fp_msg_hdr_t resp_hdr = p_sess0->base.req_fp_hdr;
         resp_hdr.func_id |= RESP_BIT_MASK;
         resp_hdr.status = FP_CMD_STATUS_NOERROR;
@@ -7301,9 +7342,9 @@ TEST_CASE("Test response frames keep the status the server sent", "[dispatch][cl
     rx_ctx.data_size                        = resp_size;
 
     auto send_async_and_reply = [&](const fp_cmd_status_t status, const uint32_t size = resp_size) {
-        REQUIRE(FP_CMD_STATUS_NOERROR == fp_disp_client_send_req(&req_ctx, client_if_id, test_fn_id, FP_FRAME_TYPE_REQ,
-                                                                 reinterpret_cast<uint8_t *>(&req_hdr), sizeof(req_hdr),
-                                                                 nullptr, &resp_handler, test_timeout));
+        REQUIRE(FP_CMD_STATUS_NOERROR == fp_disp_client_send_req_bounded(&req_ctx, client_if_id, test_fn_id, FP_FRAME_TYPE_REQ,
+                                                                         reinterpret_cast<uint8_t *>(&req_hdr), sizeof(req_hdr),
+                                                                         nullptr, 0U, &resp_handler, test_timeout));
         fp_msg_hdr_t hdr = p_sess0->base.req_fp_hdr;
         hdr.func_id |= RESP_BIT_MASK;
         hdr.status = status;

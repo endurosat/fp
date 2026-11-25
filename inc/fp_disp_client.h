@@ -69,7 +69,14 @@ FP_API extern const fp_disp_session_attributes_t fp_disp_client_sess_attrib;
 * EXTERNAL ROUTINES DECLARATIONS
 ***************************************************************************************************
 */
-/** @brief Perform a client request with the given parameters.
+/** @brief Perform a client request without a response buffer size (deprecated).
+ *
+ *  @deprecated Use @ref fp_disp_client_send_req_bounded. The caller always supplies the size of
+ *  its response buffer; this function cannot, so a synchronous reply is bounded only by the
+ *  FIDL-declared response size (when known) or the pool-wide session capacity, which is usually
+ *  much larger than the caller buffer. It will be removed in a later release.
+ *
+ *  Behaves like @ref fp_disp_client_send_req_bounded with @p resp_max_size set to 0.
  *
  *  @param[in] p_disp_ctx FP frame request context
  *  @param[in] iface_id FP interface ID (as defined in the FIDL file annotated comment for the interface)
@@ -82,15 +89,8 @@ FP_API extern const fp_disp_session_attributes_t fp_disp_client_sess_attrib;
  *  @param[in] timeout milliseconds to wait for the reception of the response in case of blocking requests
  *
  *  @returns operation status code
- *
- *  @note The function performs size checking of the request and calls the user-registered
- *  handler (if assigned).
- *  @note On a successful synchronous request, @p p_disp_ctx->data_size is set to the number of
- *  response bytes copied into @p p_resp (0 on error/timeout).
- *  @note Writes into @p p_resp (the response copy and the error-path zeroing) are bounded by the
- *  FIDL-declared response size of the function when it is known, else by the pool-wide capacity.
- *  For a buffer smaller than that, use @ref fp_disp_client_send_req_bounded.
  */
+FP_DEPRECATED("pass the response buffer size: use fp_disp_client_send_req_bounded")
 FP_API fp_cmd_status_t fp_disp_client_send_req(fp_dispatch_info_t           *p_disp_ctx,
                                                const uint16_t                iface_id,
                                                const uint32_t                func_id,
@@ -101,23 +101,27 @@ FP_API fp_cmd_status_t fp_disp_client_send_req(fp_dispatch_info_t           *p_d
                                                fp_generic_response_handler_t p_resp_handler,
                                                const uint32_t                timeout);
 
-/** @brief Like @ref fp_disp_client_send_req, but bound the response copy to @p resp_max_size.
+/** @brief Perform a client request with the given parameters.
  *
- *  Use when @p p_resp is smaller than the pool-wide session capacity. @p resp_max_size caps the
- *  bytes written to @p p_resp on both the success copy and the error-path zeroing.
+ *  The caller always supplies the size of its response buffer in @p resp_max_size. It caps the
+ *  bytes written to @p p_resp on both the success copy and the error-path zeroing. When the
+ *  FIDL-declared response size of the function is known and smaller, that size is the cap.
  *
  *  @param[in] p_disp_ctx FP frame request context
- *  @param[in] iface_id FP interface ID
- *  @param[in] func_id FP function ID
- *  @param[in] frame_type Frame type to use for the request
+ *  @param[in] iface_id FP interface ID (as defined in the FIDL file annotated comment for the interface)
+ *  @param[in] func_id FP function ID (as defined in the FIDL file annotated comment for a method)
+ *  @param[in] frame_type Frame type to use for the request (FP_FRAME_TYPE_REQ, FP_FRAME_TYPE_REQ_ARM, FP_FRAME_TYPE_REQ_FIRE, or FP_FRAME_TYPE_REQ_DISARM)
  *  @param[in] p_req pointer to the request data buffer
  *  @param[in] req_size size in bytes of the data pointed to by @p p_req
- *  @param[in] p_resp pointer to the user response data storage (synchronous requests)
- *  @param[in] resp_max_size capacity in bytes of @p p_resp (0 == fall back to the pool capacity)
+ *  @param[in] p_resp pointer to the user response data storage (synchronous requests; NULL for asynchronous requests)
+ *  @param[in] resp_max_size capacity in bytes of @p p_resp (0 for an asynchronous request with a NULL @p p_resp)
  *  @param[in] p_resp_handler user-response handler callback (NULL => synchronous/blocking request)
  *  @param[in] timeout milliseconds to wait for the response in case of blocking requests
  *
  *  @returns operation status code
+ *
+ *  @note On a successful synchronous request, @p p_disp_ctx->data_size is set to the number of
+ *  response bytes copied into @p p_resp (0 on error/timeout).
  */
 FP_API fp_cmd_status_t fp_disp_client_send_req_bounded(fp_dispatch_info_t           *p_disp_ctx,
                                                        const uint16_t                iface_id,

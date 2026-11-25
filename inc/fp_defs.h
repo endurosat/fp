@@ -52,6 +52,15 @@ extern "C" {
 #define FP_API
 #endif
 
+/* Mark an API as deprecated; the compiler warns at every call site that is still built */
+#if defined(__GNUC__) || defined(__clang__)
+#define FP_DEPRECATED(msg) __attribute__((deprecated(msg)))
+#elif defined(_MSC_VER)
+#define FP_DEPRECATED(msg) __declspec(deprecated(msg))
+#else
+#define FP_DEPRECATED(msg)
+#endif
+
 /*
 ***************************************************************************************************
 * EXTERNAL TYPES DECLARATIONS
