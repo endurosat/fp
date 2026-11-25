@@ -4454,8 +4454,8 @@ TEST_CASE("Test FP client requests", "[dispatch]")
         REQUIRE(internal_test_env.client_resp_handler_cbk_called);
         // the dispatch context shall be transferred to the user via the callback
         REQUIRE(&test_dispatch_info == internal_test_env.p_client_resp_handler_disp_ctx);
-        // a pointer to the data shall be provided to the user via the callback
-        REQUIRE(test_dispatch_info.p_data == internal_test_env.p_untyped_resp_param);
+        // the made-up status is not NOERROR, so no data is handed over (the happy-path test covers the data)
+        REQUIRE(nullptr == internal_test_env.p_untyped_resp_param);
         // the command status from the response shall be signaled to the user
         REQUIRE(test_sys_ctx.client_session_pools[0].base.req_fp_hdr.status == internal_test_env.resp_cmd_status);
         // the signal event call is not performed when using asynchronous communication model
@@ -4708,6 +4708,9 @@ TEST_CASE("Test FP client requests", "[dispatch]")
 
         auto p_test_fp_hdr = reinterpret_cast<fp_msg_hdr_t *>(test_dispatch_info.p_data);
         *p_test_fp_hdr     = test_sys_ctx.client_session_pools[0].base.req_fp_hdr;
+        // only a NOERROR reply is size-checked; an error status passes through (see the
+        // response-status test case for header-only error replies)
+        p_test_fp_hdr->status = FP_CMD_STATUS_NOERROR;
 
         REQUIRE_FALSE(internal_test_env.client_resp_handler_cbk_called);
 
@@ -7153,6 +7156,8 @@ namespace resp_status_test
 {
 // typed response of the test FIDL function: the FP header and a 4-byte payload
 constexpr uint32_t resp_size = sizeof(fp_msg_hdr_t) + 4U;
+// a reply that carries only the FP header, as fp_disp_send_status_resp sends it
+constexpr uint32_t hdr_only = sizeof(fp_msg_hdr_t);
 
 static int             resp_cnt     = 0;
 static fp_cmd_status_t resp_status  = FP_CMD_STATUS_MAX;
@@ -7190,6 +7195,7 @@ static fp_dispatch_sys_context_t     *p_sys_ctx     = nullptr;
 static fp_cmd_status_t                wire_status   = FP_CMD_STATUS_NOERROR;
 static std::array<uint8_t, resp_size> rx_buf        = {};
 static bool                           rx_dispatched = false;
+static uint32_t                       rx_size       = resp_size;
 
 static _Bool deliver_resp_during_wait(void *p_event, const uint32_t timeout_ms)
 {
@@ -7217,7 +7223,7 @@ static _Bool deliver_resp_during_wait(void *p_event, const uint32_t timeout_ms)
     fp_dispatch_info_t rx_ctx = {};
     rx_ctx.p_sys_ctx          = p_sys_ctx;
     rx_ctx.p_data             = rx_buf.data();
-    rx_ctx.data_size          = resp_size;
+    rx_ctx.data_size          = rx_size;
 
     rx_dispatched = fp_disp_execute(&rx_ctx);
 
@@ -7265,6 +7271,7 @@ TEST_CASE("Test response frames keep the status the server sent", "[dispatch][cl
     bcast_status  = FP_CMD_STATUS_MAX;
     p_sys_ctx     = &test_sys_ctx;
     rx_dispatched = false;
+    rx_size       = resp_size;
 
     fp_disp_session_mgr_init(&test_sys_ctx);
 
@@ -7283,7 +7290,8 @@ TEST_CASE("Test response frames keep the status the server sent", "[dispatch][cl
         sess.resp_data_max_size = 64U;
     }
 
-    // a full-size response (header and payload) to the open async request, with the given wire status
+    // a response to the open async request, with the given wire status and size (full size by default;
+    // a server sends every status other than NOERROR as the header alone)
     std::array<uint8_t, resp_size> async_rx = {};
     fp_dispatch_info_t             rx_ctx   = {};
     rx_ctx.p_sys_ctx                        = &test_sys_ctx;
@@ -7291,7 +7299,7 @@ TEST_CASE("Test response frames keep the status the server sent", "[dispatch][cl
     rx_ctx.p_data                           = async_rx.data();
     rx_ctx.data_size                        = resp_size;
 
-    auto send_async_and_reply = [&](const fp_cmd_status_t status) {
+    auto send_async_and_reply = [&](const fp_cmd_status_t status, const uint32_t size = resp_size) {
         REQUIRE(FP_CMD_STATUS_NOERROR == fp_disp_client_send_req(&req_ctx, client_if_id, test_fn_id, FP_FRAME_TYPE_REQ,
                                                                  reinterpret_cast<uint8_t *>(&req_hdr), sizeof(req_hdr),
                                                                  nullptr, &resp_handler, test_timeout));
@@ -7300,15 +7308,17 @@ TEST_CASE("Test response frames keep the status the server sent", "[dispatch][cl
         hdr.status = status;
         async_rx.fill(0x5A);
         (void)memcpy(async_rx.data(), &hdr, sizeof(hdr));
+        rx_ctx.data_size = size;
 
         REQUIRE(fp_disp_execute(&rx_ctx));
     };
 
-    // a sync request whose response, with the given wire status, arrives while the requester waits
+    // a sync request whose response, with the given wire status and size, arrives while the requester waits
     std::array<uint8_t, resp_size> user_buf = {};
 
-    auto send_sync = [&](const fp_cmd_status_t status) {
+    auto send_sync = [&](const fp_cmd_status_t status, const uint32_t size = resp_size) {
         wire_status = status;
+        rx_size     = size;
         user_buf.fill(0xEE);
         env::fp_arch_wait_for_event.retval      = true;
         env::fp_arch_wait_for_event.p_user_stub = &deliver_resp_during_wait;
@@ -7323,7 +7333,7 @@ TEST_CASE("Test response frames keep the status the server sent", "[dispatch][cl
         return ret;
     };
 
-    SECTION("An async handler gets the error status of a full-size response")
+    SECTION("An async handler gets the error status of a full-size response, without its data")
     {
         const fp_cmd_status_t status = GENERATE(FP_CMD_STATUS_FUNC_NOT_SUPPORTED,
                                                 FP_CMD_STATUS_INVARGS,
@@ -7335,8 +7345,42 @@ TEST_CASE("Test response frames keep the status the server sent", "[dispatch][cl
 
         REQUIRE(1 == resp_cnt);
         REQUIRE(status == resp_status);
-        // the data stays available to the handler; the status tells it not to trust it
-        REQUIRE(async_rx.data() == p_resp_data);
+        // a status other than NOERROR means the function did not run: no result to hand over
+        REQUIRE(nullptr == p_resp_data);
+    }
+
+    SECTION("A header-only error reply keeps the server's status on the async and sync paths")
+    {
+        const fp_cmd_status_t status = GENERATE(FP_CMD_STATUS_FUNC_NOT_SUPPORTED,
+                                                FP_CMD_STATUS_REQ_ATTR_ERR,
+                                                FP_CMD_STATUS_DATA_INTEGRITY_ERR);
+        CAPTURE(status);
+
+        send_async_and_reply(status, hdr_only);
+        REQUIRE(1 == resp_cnt);
+        REQUIRE(status == resp_status); // not UNEXP_FRM_SIZE
+        REQUIRE(nullptr == p_resp_data);
+
+        REQUIRE(status == send_sync(status, hdr_only));
+        REQUIRE(0U == req_ctx.data_size);
+        for (const auto byte : user_buf)
+        {
+            REQUIRE(0 == byte);
+        }
+    }
+
+    SECTION("A NOERROR reply of the wrong length is still a size violation")
+    {
+        const uint32_t size = GENERATE(hdr_only, resp_size - 1U);
+        CAPTURE(size);
+
+        send_async_and_reply(FP_CMD_STATUS_NOERROR, size);
+        REQUIRE(1 == resp_cnt);
+        REQUIRE(FP_CMD_STATUS_UNEXP_FRM_SIZE == resp_status);
+        REQUIRE(nullptr == p_resp_data);
+
+        REQUIRE(FP_CMD_STATUS_UNEXP_FRM_SIZE == send_sync(FP_CMD_STATUS_NOERROR, size));
+        REQUIRE(0U == req_ctx.data_size);
     }
 
     SECTION("A sync request returns the error status of a full-size response and gets a zeroed buffer")
@@ -7369,13 +7413,17 @@ TEST_CASE("Test response frames keep the status the server sent", "[dispatch][cl
     SECTION("ARMED and DISARMED responses still pass through to async and sync requesters")
     {
         const fp_cmd_status_t status = GENERATE(FP_CMD_STATUS_ARMED, FP_CMD_STATUS_DISARMED);
-        CAPTURE(status);
+        // the server sends them as the header alone; a full-size frame must give the same result
+        const uint32_t size = GENERATE(hdr_only, resp_size);
+        CAPTURE(status, size);
 
-        send_async_and_reply(status);
+        send_async_and_reply(status, size);
         REQUIRE(1 == resp_cnt);
         REQUIRE(status == resp_status);
+        REQUIRE(nullptr == p_resp_data);
 
-        REQUIRE(status == send_sync(status));
+        REQUIRE(status == send_sync(status, size));
+        REQUIRE(0U == req_ctx.data_size);
     }
 
     SECTION("A request frame is still handed to the server with status NOERROR")

@@ -323,7 +323,6 @@ static bool fp_disp_client_handle_resp_impl(fp_dispatch_info_t *p_disp_ctx,
 
     const fp_msg_hdr_t *p_fp_hdr = (const fp_msg_hdr_t *)p_disp_ctx->p_data;
     fp_cmd_status_t user_cbk_status = p_fp_hdr->status;
-    bool is_protocol_violation = false;
 
     fp_proto_func_attr_t fattr;
 
@@ -335,15 +334,16 @@ static bool fp_disp_client_handle_resp_impl(fp_dispatch_info_t *p_disp_ctx,
                            fattr.frame_type, p_fp_hdr->iface_id, p_fp_hdr->func_id, p_fp_hdr->cmd_id);
 
         user_cbk_status = FP_CMD_STATUS_UNEXP_FRM_TYPE;
-        is_protocol_violation = true;
     }
-    else if (p_disp_ctx->data_size != resp_type_size)
+    // Only a NOERROR reply carries the typed result, so only its length is checked. A server sends
+    // every other status as the header alone (the function did not run), and the client must get
+    // that status as sent, not a size violation.
+    else if ((FP_CMD_STATUS_NOERROR == user_cbk_status) && (p_disp_ctx->data_size != resp_type_size))
     {
         FP_ARCH_TRACE_WARN("Protocol validation failed: expected_size=%u, received_size=%u, frame='%u:%lu:%u'",
                            resp_type_size, p_disp_ctx->data_size, p_fp_hdr->iface_id, p_fp_hdr->func_id, p_fp_hdr->cmd_id);
 
         user_cbk_status = FP_CMD_STATUS_UNEXP_FRM_SIZE;
-        is_protocol_violation = true;
     }
 
     fp_disp_client_session_t *p_client_session = (fp_disp_client_session_t *)fp_disp_session_mgr_find_session(p_disp_ctx->p_sys_ctx,
@@ -394,10 +394,11 @@ static bool fp_disp_client_handle_resp_impl(fp_dispatch_info_t *p_disp_ctx,
         // keep the answered request's header to recognise it afterwards
         const fp_msg_hdr_t answered_req_hdr = p_client_session->base.req_fp_hdr;
 
-        // invoke user-registered callback
+        // invoke user-registered callback; the data is handed over only with NOERROR (a server
+        // status other than NOERROR means no result, and a protocol violation means no valid one)
         (*p_client_session->p_user_handler)(
             p_disp_ctx,
-            is_protocol_violation ? NULL : p_disp_ctx->p_data,
+            (FP_CMD_STATUS_NOERROR == user_cbk_status) ? p_disp_ctx->p_data : NULL,
             user_cbk_status);
 
         fp_disp_client_defer_close(p_disp_ctx->p_sys_ctx, &p_client_session->base, &answered_req_hdr);
