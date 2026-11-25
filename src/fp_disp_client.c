@@ -309,6 +309,44 @@ fp_cmd_status_t fp_disp_client_send_req_bounded(fp_dispatch_info_t           *p_
                                         p_resp, p_resp_handler, timeout, resp_max_size);
 }
 
+/** @brief Work out the status a client gets for a received response frame
+ *
+ *  @param[in] p_disp_ctx     dispatch context holding the received frame (p_data != NULL)
+ *  @param[in] resp_type_size FIDL-declared size of the response, header included
+ *
+ *  @returns UNEXP_FRM_TYPE if the frame is not a response; UNEXP_FRM_SIZE if a NOERROR reply does not
+ *           have the declared size; otherwise the status the server sent
+ */
+static fp_cmd_status_t fp_disp_client_resp_status(const fp_dispatch_info_t *p_disp_ctx,
+                                                  const uint32_t            resp_type_size)
+{
+    const fp_msg_hdr_t  *p_fp_hdr = (const fp_msg_hdr_t *)p_disp_ctx->p_data;
+    fp_proto_func_attr_t fattr;
+
+    fp_proto_get_func_attributes(p_fp_hdr, &fattr);
+
+    if (FP_FRAME_TYPE_RESP != fattr.frame_type)
+    {
+        FP_ARCH_TRACE_WARN("Protocol validation failed: expected=RESP_FRAME, received=%u, frame='%u:%lu:%u'",
+                           fattr.frame_type, p_fp_hdr->iface_id, p_fp_hdr->func_id, p_fp_hdr->cmd_id);
+
+        return FP_CMD_STATUS_UNEXP_FRM_TYPE;
+    }
+
+    // Only a NOERROR reply carries the typed result, so only its length is checked. A server sends
+    // every other status as the header alone (the function did not run), and the client must get
+    // that status as sent, not a size violation.
+    if ((FP_CMD_STATUS_NOERROR == p_fp_hdr->status) && (p_disp_ctx->data_size != resp_type_size))
+    {
+        FP_ARCH_TRACE_WARN("Protocol validation failed: expected_size=%u, received_size=%u, frame='%u:%lu:%u'",
+                           resp_type_size, p_disp_ctx->data_size, p_fp_hdr->iface_id, p_fp_hdr->func_id, p_fp_hdr->cmd_id);
+
+        return FP_CMD_STATUS_UNEXP_FRM_SIZE;
+    }
+
+    return (fp_cmd_status_t)p_fp_hdr->status;
+}
+
 static bool fp_disp_client_handle_resp_impl(fp_dispatch_info_t *p_disp_ctx,
                                             const uint32_t      resp_type_size,
                                             const bool          size_validated)
@@ -321,30 +359,8 @@ static bool fp_disp_client_handle_resp_impl(fp_dispatch_info_t *p_disp_ctx,
         return false;
     }
 
-    const fp_msg_hdr_t *p_fp_hdr = (const fp_msg_hdr_t *)p_disp_ctx->p_data;
-    fp_cmd_status_t user_cbk_status = p_fp_hdr->status;
-
-    fp_proto_func_attr_t fattr;
-
-    fp_proto_get_func_attributes(p_fp_hdr, &fattr);
-
-    if (FP_FRAME_TYPE_RESP != fattr.frame_type)
-    {
-        FP_ARCH_TRACE_WARN("Protocol validation failed: expected=RESP_FRAME, received=%u, frame='%u:%lu:%u'",
-                           fattr.frame_type, p_fp_hdr->iface_id, p_fp_hdr->func_id, p_fp_hdr->cmd_id);
-
-        user_cbk_status = FP_CMD_STATUS_UNEXP_FRM_TYPE;
-    }
-    // Only a NOERROR reply carries the typed result, so only its length is checked. A server sends
-    // every other status as the header alone (the function did not run), and the client must get
-    // that status as sent, not a size violation.
-    else if ((FP_CMD_STATUS_NOERROR == user_cbk_status) && (p_disp_ctx->data_size != resp_type_size))
-    {
-        FP_ARCH_TRACE_WARN("Protocol validation failed: expected_size=%u, received_size=%u, frame='%u:%lu:%u'",
-                           resp_type_size, p_disp_ctx->data_size, p_fp_hdr->iface_id, p_fp_hdr->func_id, p_fp_hdr->cmd_id);
-
-        user_cbk_status = FP_CMD_STATUS_UNEXP_FRM_SIZE;
-    }
+    const fp_msg_hdr_t *p_fp_hdr        = (const fp_msg_hdr_t *)p_disp_ctx->p_data;
+    fp_cmd_status_t     user_cbk_status = fp_disp_client_resp_status(p_disp_ctx, resp_type_size);
 
     fp_disp_client_session_t *p_client_session = (fp_disp_client_session_t *)fp_disp_session_mgr_find_session(p_disp_ctx->p_sys_ctx,
                                                                                                               FP_DISP_SESSION_TYPE_CLIENT,
