@@ -154,6 +154,16 @@ static fp_cmd_status_t fp_disp_client_send_req_impl(fp_dispatch_info_t          
         return FP_CMD_STATUS_INVARGS;
     }
 
+    // a synchronous caller must say how large its response buffer is: without a size the only
+    // bound on the writes into it is the pool-wide capacity, which can overrun a typed struct
+    if ((NULL == p_resp_handler) && (NULL != p_resp) && (0U == resp_buf_user_max))
+    {
+        FP_ARCH_TRACE_ERROR("Invalid argument: synchronous request '%u:%lu' without a response buffer size",
+                            iface_id, func_id);
+
+        return FP_CMD_STATUS_INVARGS;
+    }
+
     FP_ARCH_TRACE_DEBUG("Client request entry: iface_id=%u, func_id=%lu, frame_type=%u",
                         iface_id, func_id, frame_type);
 
@@ -185,7 +195,8 @@ static fp_cmd_status_t fp_disp_client_send_req_impl(fp_dispatch_info_t          
     // unblock
     p_client_session->p_resp_data = p_resp;
 
-    // per-request response buffer capacity (0 == use the pool-wide resp_data_max_size)
+    // per-request response buffer capacity (0 only for an async request: the pool-wide
+    // resp_data_max_size then bounds any copy)
     p_client_session->resp_buf_user_max = resp_buf_user_max;
 
     // reset per-request delivered size; set by handle_resp on a successful copy
@@ -289,7 +300,7 @@ fp_cmd_status_t fp_disp_client_send_req(fp_dispatch_info_t           *p_disp_ctx
                                         fp_generic_response_handler_t p_resp_handler,
                                         const uint32_t                timeout)
 {
-    // 0 == no caller bound; copy is bounded by the pool-wide resp_data_max_size
+    // no caller bound: rejected for a synchronous request, accepted for an asynchronous one
     return fp_disp_client_send_req_impl(p_disp_ctx, iface_id, func_id, frame_type, p_req, req_size,
                                         p_resp, p_resp_handler, timeout, 0U);
 }

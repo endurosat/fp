@@ -179,7 +179,7 @@ typedef struct
     void                         *p_session_event;    /**< pointer to a session event variable used to implement blocking for synchronous FP requests */
     uint8_t                      *p_resp_data;        /**< in case of synchronous requests, this is a pointer to the buffer to copy the received response data to (used by fp_disp to deliver the data to the original user thread) */
     uint32_t                      resp_data_max_size; /**< pool-wide capacity of the response slot; set once at pool init, never per-request */
-    uint32_t                      resp_buf_user_max;  /**< per-request caller buffer capacity (resp_max_size of fp_disp_client_send_req_bounded); 0 only for an asynchronous request or the deprecated fp_disp_client_send_req, in which case resp_data_max_size bounds the copy */
+    uint32_t                      resp_buf_user_max;  /**< per-request caller buffer capacity (resp_max_size of fp_disp_client_send_req_bounded); 0 only for an asynchronous request, in which case resp_data_max_size bounds any copy */
     uint32_t                      resp_data_size;     /**< number of response bytes actually delivered to the user buffer for the last sync reply (0 on error/timeout) */
 } fp_disp_client_session_t;
 

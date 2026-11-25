@@ -534,7 +534,7 @@ typedef struct {
     void                         *p_session_event;    // Event for sync waiting
     uint8_t                      *p_resp_data;        // Response buffer (sync only)
     uint32_t                      resp_data_max_size; // Pool-wide response slot capacity
-    uint32_t                      resp_buf_user_max;  // Caller buffer capacity (0 = async or deprecated unbounded call)
+    uint32_t                      resp_buf_user_max;  // Caller buffer capacity (0 = async request only)
     uint32_t                      resp_data_size;     // Bytes delivered for the last sync reply
 } fp_disp_client_session_t;
 ```
@@ -1287,7 +1287,8 @@ printf("iface_id: 0x%04X, func_id: 0x%08X, cmd_id: 0x%04X, status: 0x%02X\n",
 #### Client API
 ```c
 // The caller always supplies the response buffer size: a synchronous response is never
-// copied or cleared beyond resp_max_size bytes. For an asynchronous request,
+// copied or cleared beyond resp_max_size bytes, and a synchronous request with
+// resp_max_size 0 returns FP_CMD_STATUS_INVARGS. For an asynchronous request,
 // p_disp_ctx->p_on_released (optional) is called once after the session is closed;
 // see "Asynchronous Requests"
 fp_cmd_status_t fp_disp_client_send_req_bounded(
@@ -1303,8 +1304,8 @@ fp_cmd_status_t fp_disp_client_send_req_bounded(
     const uint32_t timeout
 );
 
-// Deprecated: no response buffer size; use fp_disp_client_send_req_bounded.
-// Removed in a later release.
+// Deprecated: no response buffer size, so every synchronous request returns
+// FP_CMD_STATUS_INVARGS; use fp_disp_client_send_req_bounded. Removed in a later release.
 fp_cmd_status_t fp_disp_client_send_req(
     fp_dispatch_info_t *p_disp_ctx,
     const uint16_t iface_id,

@@ -4140,30 +4140,58 @@ TEST_CASE("Test FP client requests", "[dispatch]")
         REQUIRE(internal_test_env.dummy_send_cbk_called);
     }
 
-    SECTION("Deprecated fp_disp_client_send_req passes no response size to the shared implementation")
+    SECTION("A synchronous request with a response buffer and no response size is rejected before a session opens")
     {
-        atomic_store(&test_sys_ctx.client_session_pools[0].base.state, FP_SESSION_STATE_INACTIVE);
+        // counts the client sessions free for a new request
+        auto free_sessions = [&]() {
+            int cnt = 0;
+            for (auto &sess : test_sys_ctx.client_session_pools)
+            {
+                cnt += (FP_SESSION_STATE_INACTIVE == atomic_load(&sess.base.state)) ? 1 : 0;
+            }
+            return cnt;
+        };
 
         env::fp_arch_wait_for_event.retval       = true;
         internal_test_env.dummy_send_cbk_ret_val = true;
 
-        uint8_t resp_buf[sizeof(fp_msg_hdr_t)] = {};
+        uint8_t   resp_buf[sizeof(fp_msg_hdr_t)] = {};
+        const int free_before                    = free_sessions();
+        REQUIRE(0 < free_before);
 
+        REQUIRE(FP_CMD_STATUS_INVARGS == fp_disp_client_send_req_bounded(&test_dispatch_info, test_if_id, test_func_id, FP_FRAME_TYPE_REQ,
+                                                                         test_dispatch_info.p_data, test_dispatch_info.data_size,
+                                                                         resp_buf, 0U, nullptr, test_timeout));
+
+        // the deprecated call passes no size, so it is rejected for every synchronous request
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 #endif
-        const fp_cmd_status_t status = fp_disp_client_send_req(&test_dispatch_info, test_if_id, test_func_id, FP_FRAME_TYPE_REQ,
-                                                               test_dispatch_info.p_data, test_dispatch_info.data_size,
-                                                               resp_buf, nullptr, test_timeout);
+        REQUIRE(FP_CMD_STATUS_INVARGS == fp_disp_client_send_req(&test_dispatch_info, test_if_id, test_func_id, FP_FRAME_TYPE_REQ,
+                                                                 test_dispatch_info.p_data, test_dispatch_info.data_size,
+                                                                 resp_buf, nullptr, test_timeout));
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic pop
 #endif
 
-        // a synchronous request without a size is still accepted by this release
-        REQUIRE(FP_CMD_STATUS_NOERROR == status);
-        REQUIRE(1 == env::fp_arch_wait_for_event.call_cnt);
-        REQUIRE(0U == test_sys_ctx.client_session_pools[0].resp_buf_user_max);
+        // no session was taken, nothing was sent and nobody waited
+        REQUIRE(free_before == free_sessions());
+        REQUIRE_FALSE(internal_test_env.dummy_send_cbk_called);
+        REQUIRE(0 == env::fp_arch_wait_for_event.call_cnt);
+    }
+
+    SECTION("An asynchronous request with no response buffer and no response size is accepted")
+    {
+        atomic_store(&test_sys_ctx.client_session_pools[0].base.state, FP_SESSION_STATE_INACTIVE);
+
+        internal_test_env.dummy_send_cbk_ret_val = true;
+
+        REQUIRE(FP_CMD_STATUS_NOERROR == fp_disp_client_send_req_bounded(&test_dispatch_info, test_if_id, test_func_id, FP_FRAME_TYPE_REQ,
+                                                                         test_dispatch_info.p_data, test_dispatch_info.data_size,
+                                                                         nullptr, 0U, &test_client_resp_handler_cbk, test_timeout));
+        REQUIRE(internal_test_env.dummy_send_cbk_called);
+        REQUIRE(FP_SESSION_STATE_ACTIVE == atomic_load(&test_sys_ctx.client_session_pools[0].base.state));
     }
 
     SECTION("Test sending a synchronous FP client request (bus send succeeds but the reply times out)")

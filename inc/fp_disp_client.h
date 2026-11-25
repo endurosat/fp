@@ -72,9 +72,8 @@ FP_API extern const fp_disp_session_attributes_t fp_disp_client_sess_attrib;
 /** @brief Perform a client request without a response buffer size (deprecated).
  *
  *  @deprecated Use @ref fp_disp_client_send_req_bounded. The caller always supplies the size of
- *  its response buffer; this function cannot, so a synchronous reply is bounded only by the
- *  FIDL-declared response size (when known) or the pool-wide session capacity, which is usually
- *  much larger than the caller buffer. It will be removed in a later release.
+ *  its response buffer; this function cannot, so it returns FP_CMD_STATUS_INVARGS for every
+ *  synchronous request with a response buffer. It will be removed in a later release.
  *
  *  Behaves like @ref fp_disp_client_send_req_bounded with @p resp_max_size set to 0.
  *
@@ -106,6 +105,8 @@ FP_API fp_cmd_status_t fp_disp_client_send_req(fp_dispatch_info_t           *p_d
  *  The caller always supplies the size of its response buffer in @p resp_max_size. It caps the
  *  bytes written to @p p_resp on both the success copy and the error-path zeroing. When the
  *  FIDL-declared response size of the function is known and smaller, that size is the cap.
+ *  0 is not allowed for a synchronous request: one with a response buffer and @p resp_max_size
+ *  0 returns FP_CMD_STATUS_INVARGS before a session is opened.
  *
  *  @param[in] p_disp_ctx FP frame request context
  *  @param[in] iface_id FP interface ID (as defined in the FIDL file annotated comment for the interface)
@@ -114,7 +115,7 @@ FP_API fp_cmd_status_t fp_disp_client_send_req(fp_dispatch_info_t           *p_d
  *  @param[in] p_req pointer to the request data buffer
  *  @param[in] req_size size in bytes of the data pointed to by @p p_req
  *  @param[in] p_resp pointer to the user response data storage (synchronous requests; NULL for asynchronous requests)
- *  @param[in] resp_max_size capacity in bytes of @p p_resp (0 for an asynchronous request with a NULL @p p_resp)
+ *  @param[in] resp_max_size capacity in bytes of @p p_resp (must not be 0 for a synchronous request; 0 for an asynchronous request with a NULL @p p_resp)
  *  @param[in] p_resp_handler user-response handler callback (NULL => synchronous/blocking request)
  *  @param[in] timeout milliseconds to wait for the response in case of blocking requests
  *

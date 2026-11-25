@@ -20,6 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A synchronous client request that passes a response buffer with a response
+  size of 0 now fails with `FP_CMD_STATUS_INVARGS` before a client session is
+  opened. The pool-wide session capacity is no longer used as the bound for a
+  caller buffer of unknown size. An asynchronous request with no response
+  buffer and size 0 is still accepted.
+  **Breaking change:** the deprecated `fp_disp_client_send_req` passes no
+  size, so every synchronous call through it now fails with
+  `FP_CMD_STATUS_INVARGS`. Generated client code must be regenerated with
+  Gen_C_Gen3 v4.0 or later, which calls `fp_disp_client_send_req_bounded`
+  with the typed response size, before it is built against this release.
 - The unit tests link fp statically by default, so that they also build on
   Windows. `-DFP_LIBRARY_TYPE=SHARED` still selects the shared library.
 - gcovr is now optional for the unit tests: without it, CMake prints a
