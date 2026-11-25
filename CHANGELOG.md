@@ -17,6 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Behaviour change:** a ground tool or client that sends attribute bits to a
   regular function used to get that function's normal response and now gets
   0x53. Send plain requests to regular functions.
+- An asynchronous request no longer gets a timeout after its response. With a
+  transport that hands responses to `fp_disp_execute` and does not close the session
+  from its `p_track` callback, the response handler ran a second time with
+  `FP_CMD_STATUS_TIMEOUT` at the request timeout, and the session, with its request
+  context and transport connection, stayed in use until then. The service now stops
+  the request timer after the response handler has returned and the next
+  `fp_disp_session_mgr_track_sessions` pass closes the session: `p_close`, then the
+  release handler, both without any fp lock held. For such transports `p_close` now
+  runs right after the response instead of at the timeout. Transports that close the
+  session from `p_track` or `p_deliver`, such as fp_csp_binder, are not affected.
 
 ## [1.5.1] - 2026-11-20
 

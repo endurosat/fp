@@ -624,9 +624,11 @@ static void defer_session(fp_disp_session_base_t *const     p_sess,
 static void run_deferred_sessions(fp_dispatch_sys_context_t *const    p_sys_ctx,
                                   const fp_disp_session_data_t *const p_sess_data)
 {
-    // Only fp_disp_session_mgr_track_sessions sets or clears the DEFERRED state, and sessions are only
-    // allocated from INACTIVE, so reading the pool here is safe. A session left DEFERRED by an earlier
-    // pass (its close could not take the lock) is retried.
+    // Only fp_disp_session_mgr_track_sessions clears the DEFERRED state. It is set under the client-session
+    // lock, by the tracker or by the async response path (ACTIVE only, action written before the state),
+    // and sessions are only allocated from INACTIVE, so reading the pool here is safe. A session left
+    // DEFERRED by an earlier pass (its close could not take the lock), or marked by a response after this
+    // pass's locked phase, is closed by this pass or the next.
     for (uint16_t sess_idx = 0; sess_idx < p_sess_data->max_session_cnt; sess_idx++)
     {
         fp_disp_session_base_t *const p_sess = fp_disp_session_mgr_get_base_ptr((uint8_t *)p_sess_data->p_session_pool, FP_DISP_SESSION_TYPE_CLIENT, sess_idx);

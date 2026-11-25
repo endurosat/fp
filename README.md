@@ -503,9 +503,10 @@ The FP service maintains sophisticated session tracking for both client and serv
 1. Created when sending request
 2. Tracks timeout for response
 3. Matches incoming response by `cmd_id`
-4. Closed on timeout, or, for a response, when the transport's `p_track` or
-   `p_deliver` callback returns `FP_DISP_TRACK_ACTION_CLOSE_SESSION` (a synchronous
-   request is closed by the sending thread after the response)
+4. Closed on timeout, or after a response: by the next tracking pass for an
+   asynchronous request (in the same pass when the transport's `p_track` or
+   `p_deliver` callback returns `FP_DISP_TRACK_ACTION_CLOSE_SESSION`), or by the
+   sending thread for a synchronous request
 5. For an asynchronous request, the release handler runs after the transport close
    callback (see [Asynchronous Requests](#asynchronous-requests))
 
@@ -940,7 +941,7 @@ if (status == FP_CMD_STATUS_NOERROR) {
 
 An asynchronous request (a non-NULL response handler) has two handlers:
 
-- The **response handler** delivers the result: the response, a timeout
+- The **response handler** delivers the result, exactly once: the response, a timeout
   (`FP_CMD_STATUS_TIMEOUT`) or a protocol violation. When it runs, the request's
   session still owns `p_comm_params`, and the transport has not closed its
   connection yet. Do not free or reuse the request context here.
@@ -968,11 +969,13 @@ When the session is closed depends on the transport:
 - A transport whose `p_track` callback dispatches the response itself and returns
   `FP_DISP_TRACK_ACTION_CLOSE_SESSION` still works, in the same order, but its
   response handler then runs under the client-session lock.
-- The service does not close an asynchronous session when it delivers a response
-  that a transport receive thread passed to `fp_disp_execute`. With such a transport
-  the session stays active until its timeout. The response handler then runs a
-  second time with `FP_CMD_STATUS_TIMEOUT`, and the release handler runs after that.
-  The request context stays in use for the full timeout.
+- With a transport whose receive thread passes the response to `fp_disp_execute`
+  (its `p_track` callback does not close the session), the service stops the
+  request timer once the response handler has returned and marks the session for
+  closing. The next tracking pass calls `p_close` and then the release handler,
+  without the lock. The order is: response handler, `p_close`, release handler,
+  and the response handler is not called again with `FP_CMD_STATUS_TIMEOUT`. A
+  duplicate of the response that arrives after that finds no session.
 - If the tracker cannot take the client-session lock for the close, the session
   stays marked for closing and the next tracking pass retries the close. Until then
   the request context stays in use, as does the transport connection.

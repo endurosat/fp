@@ -86,6 +86,27 @@ static fp_session_released_handler_t fp_disp_client_session_release(fp_disp_sess
  */
 static void fp_disp_client_session_timeout(fp_disp_session_base_t *const p_sess);
 
+/** @brief Marks an asynchronous request's session for a deferred close once its response handler has run
+ *
+ *  Stops the session timer and marks the session @ref FP_SESSION_STATE_DEFERRED with
+ *  @ref FP_SESSION_DEFERRED_CLOSE, so that the next session tracking pass closes it and runs the transport
+ *  close callback and the release handler without any fp lock held. The request then gets exactly one
+ *  response handler call and no timeout.
+ *
+ *  Leaves the session alone when it is no longer @ref FP_SESSION_STATE_ACTIVE (a session deferred for
+ *  delivery is closed by its p_deliver result, a timed-out one keeps its timeout), when it no longer
+ *  holds the answered request (it timed out, was closed and was reused while the response handler ran),
+ *  and when the response was dispatched from the transport's p_track callback inside the locked tracker
+ *  phase (the tracker owns the session for that pass and closes it through the p_track result).
+ *
+ *  @param[in] p_sys_ctx  pointer to the system context
+ *  @param[in] p_sess     pointer to the client session that took the response
+ *  @param[in] p_req_hdr  the session's request header, as it was before the response handler ran
+ */
+static void fp_disp_client_defer_close(fp_dispatch_sys_context_t *const p_sys_ctx,
+                                       fp_disp_session_base_t *const    p_sess,
+                                       const fp_msg_hdr_t *const        p_req_hdr);
+
 /*
 ***************************************************************************************************
 * EXTERNAL VARIABLES DEFINITION
@@ -369,11 +390,17 @@ static bool fp_disp_client_handle_resp_impl(fp_dispatch_info_t *p_disp_ctx,
 
         fp_arch_assert(NULL != p_client_session->p_user_handler);
 
+        // the session may be timed out, closed and reused while the handler runs without the lock:
+        // keep the answered request's header to recognise it afterwards
+        const fp_msg_hdr_t answered_req_hdr = p_client_session->base.req_fp_hdr;
+
         // invoke user-registered callback
         (*p_client_session->p_user_handler)(
             p_disp_ctx,
             is_protocol_violation ? NULL : p_disp_ctx->p_data,
             user_cbk_status);
+
+        fp_disp_client_defer_close(p_disp_ctx->p_sys_ctx, &p_client_session->base, &answered_req_hdr);
     }
     else
     {
@@ -607,4 +634,48 @@ static fp_session_released_handler_t fp_disp_client_session_release(fp_disp_sess
     p_client_session->p_released_handler = NULL;
 
     return p_handler;
+}
+
+static void fp_disp_client_defer_close(fp_dispatch_sys_context_t *const p_sys_ctx,
+                                       fp_disp_session_base_t *const    p_sess,
+                                       const fp_msg_hdr_t *const        p_req_hdr)
+{
+    fp_arch_assert((NULL != p_sys_ctx) && (NULL != p_sess) && (NULL != p_req_hdr));
+
+    // inside the locked tracker phase (dispatch from p_track): the tracker owns the session for this
+    // pass and closes it through the p_track result; a mark here could be overwritten by its timeout check
+    if (true == p_sys_ctx->client_track_locked)
+    {
+        return;
+    }
+
+    void *p_section_lock = p_sys_ctx->p_section_locks[FP_LOCK_SECTION_CLIENT_SESSION];
+
+    if (!fp_arch_lock_section(p_section_lock))
+    {
+        // the session stays active and times out as before
+        FP_ARCH_TRACE_ERROR("Lock acquire failed: type=client_session, handle=%p, context=resp_defer_close, session_id=%p",
+                            p_section_lock, p_sess);
+
+        return;
+    }
+
+    // a session already deferred (for delivery, or for its timeout while the response handler ran)
+    // is finished by the session tracker as marked; a session reused for another request is not ours
+    if ((FP_SESSION_STATE_ACTIVE == atomic_load(&p_sess->state)) &&
+        (p_sess->req_fp_hdr.iface_id == p_req_hdr->iface_id) &&
+        (p_sess->req_fp_hdr.func_id == p_req_hdr->func_id) &&
+        (p_sess->req_fp_hdr.cmd_id == p_req_hdr->cmd_id))
+    {
+        fp_arch_stop_timer(&p_sess->timer_hnd);
+
+        // the action is set before the state: the tracker reads the action once it sees DEFERRED
+        p_sess->deferred_action = (uint8_t)FP_SESSION_DEFERRED_CLOSE;
+        atomic_store(&p_sess->state, FP_SESSION_STATE_DEFERRED);
+
+        FP_ARCH_TRACE_DEBUG("Session close deferred after response: session_id=%p, request='%u:%lu:%u'",
+                            p_sess, p_sess->req_fp_hdr.iface_id, p_sess->req_fp_hdr.func_id, p_sess->req_fp_hdr.cmd_id);
+    }
+
+    fp_arch_unlock_section(p_section_lock);
 }

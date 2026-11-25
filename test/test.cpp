@@ -6294,13 +6294,18 @@ struct log_t
 static log_t                      log;
 static fp_dispatch_sys_context_t *p_rx_sys_ctx = nullptr;
 static int                        lock_depth   = 0;
+static int                        max_lock_depth = 0;
 
 // makes the section-lock stubs count how many section locks are held (all lock attempts succeed)
 static void track_lock_depth(void)
 {
     lock_depth                              = 0;
+    max_lock_depth                          = 0;
     env::fp_arch_lock_section.retval        = true;
-    env::fp_arch_lock_section.p_user_stub   = +[](void *const) -> _Bool { ++lock_depth; return true; };
+    env::fp_arch_lock_section.p_user_stub   = +[](void *const) -> _Bool {
+        max_lock_depth = std::max(max_lock_depth, ++lock_depth);
+        return true;
+    };
     env::fp_arch_unlock_section.p_user_stub = +[](void *const) { --lock_depth; };
 }
 
@@ -6338,8 +6343,9 @@ static void released_handler_b(void *p_comm_params)
     log.release_handler_ids.push_back(2);
 }
 
-// dispatches a NOERROR response for the session's request, as a transport would
-static void dispatch_resp(fp_disp_session_base_t *const p_sess)
+// hands a NOERROR response for the session's request to the client, as a transport would;
+// returns whether a client session took it
+static bool try_dispatch_resp(fp_disp_session_base_t *const p_sess)
 {
     fp_msg_hdr_t hdr = p_sess->req_fp_hdr;
     hdr.func_id |= RESP_BIT_MASK;
@@ -6351,7 +6357,35 @@ static void dispatch_resp(fp_disp_session_base_t *const p_sess)
     rx_ctx.p_data             = reinterpret_cast<uint8_t *>(&hdr);
     rx_ctx.data_size          = sizeof(hdr);
 
-    REQUIRE(fp_disp_client_handle_resp(&rx_ctx, sizeof(hdr)));
+    return fp_disp_client_handle_resp(&rx_ctx, sizeof(hdr));
+}
+
+// dispatches a NOERROR response for the session's request, as a transport would
+static void dispatch_resp(fp_disp_session_base_t *const p_sess)
+{
+    REQUIRE(try_dispatch_resp(p_sess));
+}
+
+// a response handler during which a concurrent tracker marks the session for its timeout
+static void resp_handler_marks_timeout(void *p_disp_ctx, uint8_t *p_untyped_resp, const fp_cmd_status_t cmd_status)
+{
+    auto *const p_sess = static_cast<fp_dispatch_info_t *>(p_disp_ctx)->p_assigned_sess;
+
+    resp_handler(p_disp_ctx, p_untyped_resp, cmd_status);
+
+    p_sess->deferred_action = FP_SESSION_DEFERRED_TIMEOUT;
+    atomic_store(&p_sess->state, FP_SESSION_STATE_DEFERRED);
+}
+
+// a response handler during which the session times out, is closed and is reused by a new request
+static void resp_handler_sess_reused(void *p_disp_ctx, uint8_t *p_untyped_resp, const fp_cmd_status_t cmd_status)
+{
+    auto *const p_sess = static_cast<fp_dispatch_info_t *>(p_disp_ctx)->p_assigned_sess;
+
+    resp_handler(p_disp_ctx, p_untyped_resp, cmd_status);
+
+    // a new request gets a new cmd_id; the session is active again
+    p_sess->req_fp_hdr.cmd_id = static_cast<uint16_t>(p_sess->req_fp_hdr.cmd_id + 1U);
 }
 
 // a transport that dispatches the response inside p_track (under the client-session lock), then
@@ -6524,24 +6558,60 @@ TEST_CASE("Test async client request release handler", "[dispatch][client][relea
         REQUIRE(3U == release_test::log.events.size());
     }
 
-    SECTION("Transport that does not close the session on a response: release comes only at the timeout")
+    SECTION("Transport that does not close the session on a response: one response, closed on the next tracking pass")
     {
-        // pins the current behaviour: the async response path does not close the session itself,
-        // so the session stays active until the timeout, which calls the response handler a second
-        // time and only then closes the session and releases the comm params
+        // the async response path marks the session for a deferred close; the next tracking pass
+        // closes it and runs the release handler without the lock. The timeout never fires.
         REQUIRE(FP_CMD_STATUS_NOERROR == send_async());
 
-        fp_msg_hdr_t resp_hdr = p_sess0->base.req_fp_hdr;
-        resp_hdr.func_id |= RESP_BIT_MASK;
-        resp_hdr.status = FP_CMD_STATUS_NOERROR;
+        release_test::track_lock_depth();
+        release_test::dispatch_resp(&p_sess0->base);
 
-        fp_dispatch_info_t rx_ctx = {};
-        rx_ctx.p_sys_ctx          = &test_sys_ctx;
-        rx_ctx.p_comm_params      = &app_ctx;
-        rx_ctx.p_data             = reinterpret_cast<uint8_t *>(&resp_hdr);
-        rx_ctx.data_size          = sizeof(resp_hdr);
+        REQUIRE(release_test::log.events == std::vector<event_t>{ event_t::resp });
+        REQUIRE(FP_CMD_STATUS_NOERROR == release_test::log.resp_status);
+        REQUIRE(FP_SESSION_STATE_DEFERRED == atomic_load(&p_sess0->base.state));
+        REQUIRE(FP_SESSION_DEFERRED_CLOSE == p_sess0->base.deferred_action);
+        REQUIRE(0 == release_test::lock_depth);
 
-        REQUIRE(fp_disp_client_handle_resp(&rx_ctx, sizeof(resp_hdr)));
+        // a late duplicate of the response finds no session
+        REQUIRE_FALSE(release_test::try_dispatch_resp(&p_sess0->base));
+        REQUIRE(release_test::log.events == std::vector<event_t>{ event_t::resp });
+
+        // even with the request timer elapsed, the next pass only closes the session
+        env::fp_arch_is_timer_elapsed.retval = true;
+        fp_disp_session_mgr_track_sessions(&test_sys_ctx);
+
+        REQUIRE(release_test::log.events == std::vector<event_t>{ event_t::resp, event_t::close, event_t::release });
+        REQUIRE(FP_CMD_STATUS_NOERROR == release_test::log.resp_status);
+        REQUIRE(release_test::log.lock_depths == std::vector<int>{ 0, 1, 0 });
+        REQUIRE(release_test::log.close_comm_params == std::vector<void *>{ &app_ctx });
+        REQUIRE(release_test::log.release_comm_params == std::vector<void *>{ &app_ctx });
+        REQUIRE(FP_SESSION_STATE_INACTIVE == atomic_load(&p_sess0->base.state));
+        REQUIRE(0U == test_sys_ctx.client_metrics.timed_out_session_cnt);
+        REQUIRE(1U == test_sys_ctx.client_metrics.closed_session_cnt);
+        REQUIRE_FALSE(release_test::break_assert_failed());
+
+        fp_disp_session_mgr_track_sessions(&test_sys_ctx);
+        REQUIRE(3U == release_test::log.events.size());
+    }
+
+    SECTION("Response path cannot take the client-session lock: the session stays active and times out as before")
+    {
+        REQUIRE(FP_CMD_STATUS_NOERROR == send_async());
+
+        // the session lookup takes the lock (1st); the deferred-close mark fails to take it (2nd)
+        static int lock_call_cnt = 0;
+        lock_call_cnt            = 0;
+
+        env::fp_arch_lock_section.p_user_stub = +[](void *const) -> _Bool {
+            env::fp_arch_lock_section.retval = (2 != ++lock_call_cnt);
+            return true;
+        };
+
+        release_test::dispatch_resp(&p_sess0->base);
+
+        env::fp_arch_lock_section.p_user_stub = nullptr;
+        env::fp_arch_lock_section.retval      = true;
 
         REQUIRE(release_test::log.events == std::vector<event_t>{ event_t::resp });
         REQUIRE(FP_SESSION_STATE_ACTIVE == atomic_load(&p_sess0->base.state));
@@ -6551,7 +6621,32 @@ TEST_CASE("Test async client request release handler", "[dispatch][client][relea
 
         REQUIRE(release_test::log.events == std::vector<event_t>{ event_t::resp, event_t::resp, event_t::close, event_t::release });
         REQUIRE(FP_CMD_STATUS_TIMEOUT == release_test::log.resp_status);
-        REQUIRE(release_test::log.release_comm_params == std::vector<void *>{ &app_ctx });
+    }
+
+    SECTION("A session the tracker timed out while the response handler ran keeps its timeout")
+    {
+        // the response handler marks the session as a concurrent locked tracker phase would after
+        // the timeout; the response path must not turn that mark into a plain close
+        REQUIRE(FP_CMD_STATUS_NOERROR == fp_disp_client_send_req(&disp_ctx, test_if_id, test_func_id, FP_FRAME_TYPE_REQ,
+                                                                 reinterpret_cast<uint8_t *>(&req_hdr), sizeof(req_hdr),
+                                                                 nullptr, &release_test::resp_handler_marks_timeout, test_timeout));
+
+        release_test::dispatch_resp(&p_sess0->base);
+
+        REQUIRE(FP_SESSION_STATE_DEFERRED == atomic_load(&p_sess0->base.state));
+        REQUIRE(FP_SESSION_DEFERRED_TIMEOUT == p_sess0->base.deferred_action);
+    }
+
+    SECTION("A session reused by a new request while the response handler ran is not closed")
+    {
+        REQUIRE(FP_CMD_STATUS_NOERROR == fp_disp_client_send_req(&disp_ctx, test_if_id, test_func_id, FP_FRAME_TYPE_REQ,
+                                                                 reinterpret_cast<uint8_t *>(&req_hdr), sizeof(req_hdr),
+                                                                 nullptr, &release_test::resp_handler_sess_reused, test_timeout));
+
+        release_test::dispatch_resp(&p_sess0->base);
+
+        REQUIRE(FP_SESSION_STATE_ACTIVE == atomic_load(&p_sess0->base.state));
+        REQUIRE(FP_SESSION_DEFERRED_NONE == p_sess0->base.deferred_action);
     }
 
     SECTION("Send failure: the request returns an error and release never runs")
@@ -6831,6 +6926,48 @@ TEST_CASE("Test async client request release handler", "[dispatch][client][relea
         // the response handler runs under the lock because this transport dispatches in p_track
         REQUIRE(release_test::log.events == std::vector<event_t>{ event_t::resp, event_t::close, event_t::release });
         REQUIRE(release_test::log.lock_depths == std::vector<int>{ 1, 1, 0 });
+    }
+
+    SECTION("Deferred delivery with the request timer elapsed: one response, exactly one transport close")
+    {
+        REQUIRE(FP_CMD_STATUS_NOERROR == send_async());
+
+        callbacks.p_track   = &release_test::track_deliver_cbk;
+        callbacks.p_deliver = &release_test::deliver_cbk;
+        fp_disp_session_mgr_register_callbacks(&test_sys_ctx, &callbacks);
+
+        release_test::track_lock_depth();
+        env::fp_arch_is_timer_elapsed.retval = true;
+        fp_disp_session_mgr_track_sessions(&test_sys_ctx);
+        fp_disp_session_mgr_track_sessions(&test_sys_ctx);
+
+        REQUIRE(1 == release_test::log.deliver_cnt);
+        REQUIRE(release_test::log.events == std::vector<event_t>{ event_t::resp, event_t::close, event_t::release });
+        REQUIRE(1U == release_test::log.close_comm_params.size());
+        REQUIRE(FP_CMD_STATUS_NOERROR == release_test::log.resp_status);
+        REQUIRE(0U == test_sys_ctx.client_metrics.timed_out_session_cnt);
+        REQUIRE(1U == test_sys_ctx.client_metrics.closed_session_cnt);
+        REQUIRE(1 == release_test::max_lock_depth);
+        REQUIRE_FALSE(release_test::break_assert_failed());
+    }
+
+    SECTION("Dispatch inside p_track with the request timer elapsed: one response, exactly one transport close")
+    {
+        REQUIRE(FP_CMD_STATUS_NOERROR == send_async());
+
+        callbacks.p_track = &release_test::track_rx_cbk;
+        fp_disp_session_mgr_register_callbacks(&test_sys_ctx, &callbacks);
+
+        env::fp_arch_is_timer_elapsed.retval = true;
+        fp_disp_session_mgr_track_sessions(&test_sys_ctx);
+        fp_disp_session_mgr_track_sessions(&test_sys_ctx);
+
+        REQUIRE(release_test::log.events == std::vector<event_t>{ event_t::resp, event_t::close, event_t::release });
+        REQUIRE(1U == release_test::log.close_comm_params.size());
+        REQUIRE(FP_CMD_STATUS_NOERROR == release_test::log.resp_status);
+        REQUIRE(0U == test_sys_ctx.client_metrics.timed_out_session_cnt);
+        REQUIRE(1U == test_sys_ctx.client_metrics.closed_session_cnt);
+        REQUIRE_FALSE(release_test::break_assert_failed());
     }
 
     SECTION("A close from the locked tracker phase is flagged")

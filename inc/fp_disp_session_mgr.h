@@ -65,8 +65,10 @@ typedef enum
     FP_SESSION_STATE_INACTIVE = 0, /**< Session is not in use (available for allocation) */
     FP_SESSION_STATE_OPENED   = 1, /**< Session is allocated but timer not yet started */
     FP_SESSION_STATE_ACTIVE   = 2, /**< Session is active with timer running */
-    FP_SESSION_STATE_DEFERRED = 3, /**< Client session marked by the session tracker under the lock; the tracker
-                                        carries out its @ref fp_session_deferred_action_t after releasing the lock */
+    FP_SESSION_STATE_DEFERRED = 3, /**< Client session marked under the client-session lock, by the session tracker or,
+                                        once an asynchronous response has been handled, by the response path; the
+                                        tracker carries out its @ref fp_session_deferred_action_t after releasing
+                                        the lock */
     FP_SESSION_STATE_MAX           /**< Range checking value */
 } fp_session_state_t;
 
@@ -150,10 +152,11 @@ typedef void (*fp_generic_response_handler_t)(void                 *p_disp_ctx,
  *  call on, fp and the transport no longer use @p p_comm_params, so the application may reuse the
  *  request context behind it.
  *
- *  The session is closed after the response only if the transport's p_track or p_deliver callback
- *  returns FP_DISP_TRACK_ACTION_CLOSE_SESSION; otherwise it is closed at the request timeout, after a
- *  second response handler call with FP_CMD_STATUS_TIMEOUT. If the session tracker cannot take the
- *  client-session lock for the close, it retries on its next pass, so the handler runs later.
+ *  After the response handler has run, the session is closed on the next session tracking pass, or in
+ *  the same pass when the transport's p_track or p_deliver callback returned
+ *  FP_DISP_TRACK_ACTION_CLOSE_SESSION; the response handler is not called again with
+ *  FP_CMD_STATUS_TIMEOUT. If the session tracker cannot take the client-session lock for the close, it
+ *  retries on its next pass, so the handler runs later.
  *
  *  The handler gets no other argument, so @p p_comm_params is how the application identifies the
  *  request: give each in-flight asynchronous request its own non-NULL p_comm_params that maps to
