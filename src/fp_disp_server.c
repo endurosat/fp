@@ -144,6 +144,22 @@ void fp_disp_server_handle_req(fp_dispatch_info_t             *p_disp_ctx,
     {
         case FP_DISP_SERVER_REQ_TYPE_REGULAR:
             {
+                fp_proto_func_attr_t fattr;
+
+                fp_proto_get_func_attributes(p_fp_hdr, &fattr);
+
+                // a regular function accepts only plain requests: ARM, FIRE and DISARM attribute bits
+                // are valid only for functions configured for ARM-and-FIRE
+                if (FP_FRAME_TYPE_REQ != fattr.frame_type)
+                {
+                    FP_ARCH_TRACE_WARN("Protocol validation failed: frame_type=%u not allowed for regular request='%u:%lu:%u', rejecting request",
+                                       (uint8_t)fattr.frame_type, p_fp_hdr->iface_id, p_fp_hdr->func_id, p_fp_hdr->cmd_id);
+
+                    (void)fp_disp_send_status_resp(p_disp_ctx, FP_CMD_STATUS_REQ_ATTR_ERR);
+
+                    break;
+                }
+
                 // directly call user-registered callback in case of a regular request
                 (*p_req_handler)(p_disp_ctx, p_disp_ctx->p_data);
 

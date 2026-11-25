@@ -1485,6 +1485,41 @@ TEST_CASE("Test FP server requests", "[dispatch]")
         REQUIRE(internal_test_env.dummy_user_func_cbk_called);
         REQUIRE(internal_test_env.p_dummy_fidl_func_user_disp_ctx == &test_dispatch_info);
         REQUIRE(internal_test_env.p_dummy_fidl_func_user_untyped_req == test_dispatch_info.p_data);
+        REQUIRE_FALSE(internal_test_env.dummy_send_cbk_called);
+    }
+
+    SECTION("Test regular server FP requests reject ARM, FIRE and DISARM frames")
+    {
+        const fp_frame_type_t attr_frame_type = GENERATE(FP_FRAME_TYPE_REQ_ARM, FP_FRAME_TYPE_REQ_FIRE, FP_FRAME_TYPE_REQ_DISARM);
+
+        CAPTURE(attr_frame_type);
+
+        fp_proto_set_function_type(&msg_hdr, test_func_id, attr_frame_type);
+        msg_hdr.status = FP_CMD_STATUS_NOERROR;
+
+        internal_test_env.dummy_send_cbk_ret_val = true;
+
+        // a stale session pointer must still be cleared when the request is rejected
+        fp_disp_session_base_t dummy_sess  = {};
+        test_dispatch_info.p_assigned_sess = &dummy_sess;
+
+        fp_disp_server_handle_req(&test_dispatch_info, FP_DISP_SERVER_REQ_TYPE_REGULAR, reinterpret_cast<fp_generic_request_handler_t>(&dummy_fidl_func_user_cbk), sizeof(fp_msg_hdr_t));
+
+        // the handler of a regular function must not run for a frame with attribute bits
+        REQUIRE_FALSE(internal_test_env.dummy_user_func_cbk_called);
+        REQUIRE(test_dispatch_info.p_assigned_sess == nullptr);
+
+        // the request is answered with REQ_ATTR_ERR
+        REQUIRE(internal_test_env.dummy_send_cbk_called);
+        REQUIRE(internal_test_env.p_sys_ctx_send_disp_ctx == &test_dispatch_info);
+
+        auto p_resp_hdr = reinterpret_cast<fp_msg_hdr_t *>(internal_test_env.p_sys_ctx_send_disp_ctx->p_data);
+        REQUIRE(p_resp_hdr->status == FP_CMD_STATUS_REQ_ATTR_ERR);
+
+        fp_proto_func_attr_t resp_attr;
+        fp_proto_get_func_attributes(p_resp_hdr, &resp_attr);
+        REQUIRE(resp_attr.frame_type == FP_FRAME_TYPE_RESP);
+        REQUIRE(resp_attr.bare_func_id == test_func_id);
     }
 
     SECTION("Test server response sending with invalid args")

@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- A regular server function (one not configured for ARM-and-FIRE) no longer
+  runs its handler for an ARM, FIRE or DISARM request frame.
+  `fp_disp_server_handle_req` now answers such a frame with status
+  `FP_CMD_STATUS_REQ_ATTR_ERR` (0x53) and does not call the handler, as it
+  already did for attribute bits that do not match an ARM-and-FIRE function.
+  **Behaviour change:** a ground tool or client that sends attribute bits to a
+  regular function used to get that function's normal response and now gets
+  0x53. Send plain requests to regular functions.
+
 ## [1.5.1] - 2026-11-20
 
 ### Fixed
