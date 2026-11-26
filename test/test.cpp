@@ -1492,12 +1492,29 @@ TEST_CASE("Test FP server requests", "[dispatch]")
 
     SECTION("Test regular server FP requests reject ARM, FIRE and DISARM frames")
     {
-        const fp_frame_type_t attr_frame_type = GENERATE(FP_FRAME_TYPE_REQ_ARM, FP_FRAME_TYPE_REQ_FIRE, FP_FRAME_TYPE_REQ_DISARM);
+        // single attribute bits decode to ARM, FIRE or DISARM; combined bits decode to no valid frame type
+        const uint32_t attr_bits = GENERATE(ARM_BIT_MASK,
+                                            FIRE_BIT_MASK,
+                                            DISARM_BIT_MASK,
+                                            ARM_BIT_MASK | FIRE_BIT_MASK,
+                                            ARM_BIT_MASK | FIRE_BIT_MASK | DISARM_BIT_MASK);
 
-        CAPTURE(attr_frame_type);
+        CAPTURE(attr_bits);
 
-        fp_proto_set_function_type(&msg_hdr, test_func_id, attr_frame_type);
-        msg_hdr.status = FP_CMD_STATUS_NOERROR;
+        // a request with payload, so the check below shows the reply is cut down to the header
+        struct
+        {
+            fp_msg_hdr_t hdr;
+            uint8_t      payload[8];
+        } req = {};
+
+        req.hdr.iface_id = msg_hdr.iface_id;
+        req.hdr.func_id  = test_func_id | attr_bits;
+        req.hdr.cmd_id   = test_cmd_id;
+        req.hdr.status   = FP_CMD_STATUS_NOERROR;
+
+        test_dispatch_info.p_data    = reinterpret_cast<uint8_t *>(&req);
+        test_dispatch_info.data_size = sizeof(req);
 
         internal_test_env.dummy_send_cbk_ret_val = true;
 
@@ -1505,7 +1522,7 @@ TEST_CASE("Test FP server requests", "[dispatch]")
         fp_disp_session_base_t dummy_sess  = {};
         test_dispatch_info.p_assigned_sess = &dummy_sess;
 
-        fp_disp_server_handle_req(&test_dispatch_info, FP_DISP_SERVER_REQ_TYPE_REGULAR, reinterpret_cast<fp_generic_request_handler_t>(&dummy_fidl_func_user_cbk), sizeof(fp_msg_hdr_t));
+        fp_disp_server_handle_req(&test_dispatch_info, FP_DISP_SERVER_REQ_TYPE_REGULAR, reinterpret_cast<fp_generic_request_handler_t>(&dummy_fidl_func_user_cbk), sizeof(req));
 
         // the handler of a regular function must not run for a frame with attribute bits
         REQUIRE_FALSE(internal_test_env.dummy_user_func_cbk_called);
@@ -1517,6 +1534,10 @@ TEST_CASE("Test FP server requests", "[dispatch]")
 
         auto p_resp_hdr = reinterpret_cast<fp_msg_hdr_t *>(internal_test_env.p_sys_ctx_send_disp_ctx->p_data);
         REQUIRE(p_resp_hdr->status == FP_CMD_STATUS_REQ_ATTR_ERR);
+
+        // the reply is header-only and keeps the request's cmd_id so the client can match it
+        REQUIRE(internal_test_env.p_sys_ctx_send_disp_ctx->data_size == sizeof(fp_msg_hdr_t));
+        REQUIRE(p_resp_hdr->cmd_id == test_cmd_id);
 
         fp_proto_func_attr_t resp_attr;
         fp_proto_get_func_attributes(p_resp_hdr, &resp_attr);
